@@ -1,0 +1,16 @@
+{
+    "name": "grokability/massdriver-server",
+    "description": "Bulk SQS Queue receiver across multiple users which dispatches Laravel Events to those users",
+    "type": "library",
+    "license": "AGPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "Brady Wetherington",
+            "email": "bwetherington@grokability.com"
+        }
+    ],
+    "require": {
+        "aws/aws-sdk-php": "^3.394",
+        "vlucas/phpdotenv": "^5.7"
+    }
+}
