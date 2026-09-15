@@ -4,7 +4,7 @@ Massdriver is a system that allows you to handle queuing on behalf of hundreds o
 Right now, the only implementation is via AWS's SQS system, but any queueing system which has a concept of 'metadata'
 that is *outside* of the payload should be able to work, once we hook it together.
 
-In your Laravel apps, you will need to install the Massdriver client and configure it in each app's .env file.
+In your Laravel apps, you will need to install the Massdriver client and configure it in each app's `.env` file.
 
 Massdriver is not a full Laravel application. But it does use two composer libraries: the AWS SDK, and DotEnv. So you
 will need to run `composer install` to install those dependencies.
@@ -29,11 +29,21 @@ resolve(Illuminate\\Contracts\\Bus\\Dispatcher::class)->dispatchNow($job);'"
 
 But you have to figure out how that will work in your environment.
 
+When trying to figure out your `COMMAND_TEMPLATE`, you can run in `--dev` mode where it won't immediately mark SQS
+messages that cause an Exception as immediately re-available, which could force SQS messages into a Dead-Letter Queue.
+
+The `MESSAGE_VISIBILITY_TIMEOUT` environment variable is very important - it determines how long the initial message 
+should take to complete (approximately). The process-management loop will evaluate if the process is still running, and 
+if there is less than half of the Visibility Timeout, it will double it. For example, let's take a `MESSAGE_VISIBILITY_TIMEOUT` of 30 seconds
+(which is SQS's default). After the resulting process has run for 15 seconds, Massdriver will then extend the timeout by
+60 seconds (total duration: 85 seconds). And then, after 30 more seconds, it will extend by 120, and so on. Using this 
+algorithm, very long-duration tasks can still complete succesfully, and short-lived tasks can still be executed quickly.
+
 Massdriver is designed to be run under some kind of daemon-management program, like systemd or supervise. It will 
 automatically exit after `TIMES_TO_RUN` executions of the main receive loop, or after having run for `DURATION_TO_RUN` 
 seconds. Sometimes during testing you might want to fire off massdriver just once, so in that case you can override your `.env`
-by prepending `TIMES_TO_RUN=0` or `DURATION_TO_RUN=0` so that it will only make one trip through the loop. It will 
-probably work better with regular, non-FIFO queues. And it definitely works much better on a queue
+by prepending `TIMES_TO_RUN=0` or `DURATION_TO_RUN=0` to your command-line invocation so that it will only make one 
+trip through the loop. It will probably work better with regular, non-FIFO queues. And it definitely works much better on a queue
 that is configured for long-polling. You can run multiple copies of it to increase performance, at the cost of more 
 resource usage. Reducing `TIMES_TO_RUN` or `DURATION_TO_RUN` to very small values _may_ annoy your daemon management
 system, and it might stop restarting your massdriver-server.
