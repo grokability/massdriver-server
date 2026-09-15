@@ -5,15 +5,15 @@ require "vendor/autoload.php";
 use Aws\Exception\AwsException;
 use Aws\Sqs\SqsClient;
 
-$dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
+//we have to use 'unsafe' to actually set the environment variables,
+// so that AWS will have access to them.
+$dotenv = Dotenv\Dotenv::createUnsafeImmutable(__DIR__);
 $dotenv->safeLoad();
 
 $client = new SqsClient([
-    'profile' => 'default',
-    'region' => $_ENV['AWS_REGION'],
     'version' => '2012-11-05'
 ]);
-print("Starting Massdriver...");
+print("Starting Massdriver...\n");
 $start = microtime(true);
 $iterations = 0;
 $duration = null;
@@ -59,10 +59,11 @@ do {
             print "Job is: $job\n\nEscaped is: ".escapeshellarg($job)."\n\nWeiredly double-scaped is: $job_escaped\n\n";
             $command_to_run = str_replace(array_keys($replacements), array_values($replacements), $_ENV['COMMAND_TEMPLATE']);
             print "COMMAND TO RUN IS:\n$command_to_run\n";
-            print "\nCOMMAND TO RUN - double-escaped - is:\n".escapeshellcmd($command_to_run)."\n";
+
             $output = null;
             $return_var = null;
             $exec_results = exec($command_to_run,$output,$return_var);
+
             print("Executed command to run! Result was: $exec_results, with return code: ($return_var)\n");
             if($return_var === 0) {
                 $delete_results = $client->deleteMessage([
@@ -77,6 +78,10 @@ do {
 
     } catch (AwsException $e) {
         // output error message if fails
+        print "AWS Exception: $e\n";
+        error_log($e->getMessage());
+    } catch (\Throwable $e) {
+        print "General Exception: $e\n";
         error_log($e->getMessage());
     } finally {
         $duration = microtime(true) - $start;

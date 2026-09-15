@@ -10,7 +10,9 @@ Massdriver is not a full Laravel application. But it does use two composer libra
 will need to run `composer install` to install those dependencies.
 
 For the server configuration, see our [.env.example](/.env.example) file. You can supply configuration in Environment 
-variables, or in a `.env` file - whichever makes the most sense in your environment.
+variables, or in a `.env` file - whichever makes the most sense in your environment. You can also set AWS variables like 
+`AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` and they'll be made available to the SQS
+Client constructor.
 
 The main part to pay attention to is `COMMAND_TEMPLATE`. This will be the 
 actual command that gets run on behalf of your Laravel apps. The `{TENANT}` identifier will be swapped out with whatever
