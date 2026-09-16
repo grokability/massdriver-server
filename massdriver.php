@@ -99,20 +99,20 @@ do {
                     }
                 }
                 $exec_results = proc_open($command_to_run, $descriptor_spec, $pipes);
-                if (!pcntl_sigprocmask(SIG_BLOCK, [SIGCHLD], $oldMask)) {
-                    throw new RuntimeException('Cannot block SIGCHLD');
-                }
                 $start_time = microtime(true);
-                $validity_window = $_ENV['MESSAGE_VISIBILITY_TIMEOUT'];
                 if(!$exec_results) {
                     throw new RuntimeException("Could not run command: $command_to_run");
                 }
+                if (!pcntl_sigprocmask(SIG_BLOCK, [SIGCHLD], $oldMask)) {
+                    throw new RuntimeException('Cannot block SIGCHLD');
+                }
+                $validity_window = $_ENV['MESSAGE_VISIBILITY_TIMEOUT'];
+                $wait_threshold = (int)$validity_window/2;
 
                 $process_status = null;
                 do {
                     $current_time=microtime(true);
                     $elapsed_time = $current_time - $start_time;
-                    $wait_threshold = 0;
                     //if more than half of the Visibility Window has expired, double it.
                     if($elapsed_time > $validity_window/2) {
                         $wait_threshold = $validity_window;
