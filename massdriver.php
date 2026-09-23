@@ -2,6 +2,13 @@
 
 require "vendor/autoload.php";
 
+//we have to use 'unsafe' to actually set the environment variables,
+// so that AWS will have access to them.
+$dotenv = Dotenv\Dotenv::createUnsafeImmutable(__DIR__);
+$dotenv->safeLoad();
+$dotenv->required(['SQS_QUEUE','AWS_REGION','COMMAND_TEMPLATE']);
+$dotenv->required(['TIMES_TO_RUN','DURATION_TO_RUN','MAX_CONCURRENCY','POLL_TIME','MESSAGE_VISIBILITY_TIMEOUT'])->isInteger();
+
 use Aws\Sts\StsClient;
 use Massdriver\MassdriverQueue;
 
@@ -13,18 +20,11 @@ try {
     $identity = $sts->getCallerIdentity();
     // print_r($identity);
     // print "Session token is: ".$sts->getSessionToken()."\n";
-} catch (\Exception $e) {
+} catch (\Throwable $e) {
     print "Error signing in to AWS - credentials problem?\n";
     print "Error message is:\n ".$e->getMessage().".\nExiting...\n";
     exit(1);
 }
-//we have to use 'unsafe' to actually set the environment variables,
-// so that AWS will have access to them.
-$dotenv = Dotenv\Dotenv::createUnsafeImmutable(__DIR__);
-$dotenv->safeLoad();
-$dotenv->required(['SQS_QUEUE','AWS_REGION','COMMAND_TEMPLATE']);
-$dotenv->required(['TIMES_TO_RUN','DURATION_TO_RUN','MAX_CONCURRENCY','POLL_TIME','MESSAGE_VISIBILITY_TIMEOUT'])->isInteger();
-
 $dev_mode = false;
 if(!empty($argv[1])) {
     if( ! in_array($argv[1],["--dev",'--help'])) {

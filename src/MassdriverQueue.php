@@ -129,7 +129,7 @@ class MassdriverQueue {
                     // Some PHP Serialization formats have NUL bytes in them, and escapeshellarg completely freaks out about those
                     $job_escaped = escapeshellarg($job);
                     $replacements['{PAYLOAD}'] = $job_escaped;
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     if(str_contains($this->command_template,'{PAYLOAD}')) {
                         throw new \RuntimeException("Could not shell-escape job payload, and {PAYLOAD} was requested in the command template");
                     }

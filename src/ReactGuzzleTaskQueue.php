@@ -55,7 +55,7 @@ class ReactGuzzleTaskQueue implements TaskQueueInterface
         try {
             $this->queue->run();
             $this->runDepth--;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             // If a raw task threw, remaining work still (maybe) gets another tick.
             print "A Guzzle task threw: $e\nRe-scheduling ";
             $this->runDepth--; //have to call this first otherwise the schedule() command will just return
