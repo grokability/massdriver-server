@@ -41,8 +41,9 @@ algorithm, very long-duration tasks can still complete succesfully, and short-li
 
 Massdriver is designed to be run under some kind of daemon-management program, like systemd or supervise. It will 
 automatically exit after `TIMES_TO_RUN` executions of the main receive loop, or after having run for `DURATION_TO_RUN` 
-seconds. Sometimes during testing you might want to fire off massdriver just once, so in that case you can override your `.env`
-by prepending `TIMES_TO_RUN=0` or `DURATION_TO_RUN=0` to your command-line invocation so that it will only make one 
+seconds, with plenty of wiggle-room for long-running tasks (so don't get too attached to that duration). Sometimes 
+during testing you might want to fire off massdriver just once, so in that case you can override your `.env`
+by prepending `TIMES_TO_RUN=1` or `DURATION_TO_RUN=1` to your command-line invocation so that it will only make one 
 trip through the loop. It will probably work better with regular, non-FIFO queues. And it definitely works much better on a queue
 that is configured for long-polling. You can run multiple copies of it to increase performance, at the cost of more 
 resource usage. Reducing `TIMES_TO_RUN` or `DURATION_TO_RUN` to very small values _may_ annoy your daemon management

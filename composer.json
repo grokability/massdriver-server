@@ -3,15 +3,27 @@
     "description": "Bulk SQS Queue receiver across multiple users which dispatches Laravel Events to those users",
     "type": "library",
     "license": "AGPL-3.0-or-later",
+    "version": "0.5",
     "authors": [
         {
             "name": "Brady Wetherington",
             "email": "bwetherington@grokability.com"
         }
     ],
+    "autoload": {
+        "psr-4": {
+            "Massdriver\\": "src/"
+        }
+    },
     "require": {
         "aws/aws-sdk-php": "^3.394",
         "vlucas/phpdotenv": "^5.7",
-        "ext-pcntl": "*"
+        "ext-pcntl": "*",
+        "react/event-loop": "^1.6",
+        "react/http": "^1.11",
+        "guzzlehttp/guzzle": "^7.8.2",
+        "guzzlehttp/psr7": "^2.6.3",
+        "guzzlehttp/promises": "^2.0.3",
+        "react/async": "^4.3"
     }
 }
