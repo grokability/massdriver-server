@@ -47,6 +47,7 @@ $massdriver = new MassdriverQueue(
     $_ENV['TIMES_TO_RUN'],
     $_ENV['DURATION_TO_RUN'],
     $_ENV['COMMAND_TEMPLATE'],
+    $_ENV['CRON_TEMPLATE'] ?? '',
     $_ENV['MESSAGE_VISIBILITY_TIMEOUT'],
     $_ENV['POLL_TIME']
 );
