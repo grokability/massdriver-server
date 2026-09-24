@@ -41,21 +41,16 @@ if(!empty($argv[1])) {
 
 print("Starting Massdriver...".($dev_mode ? "IN DEV MODE": "")."\n");
 
-$tmpfname = tempnam("/tmp", "massdriver-"); // possible race in here; not sure what to do about that...
-$handle = fopen($tmpfname, "w");
-
 $massdriver = new MassdriverQueue(
     $_ENV['SQS_QUEUE'],
     $_ENV['MAX_CONCURRENCY'],
     $_ENV['TIMES_TO_RUN'],
     $_ENV['DURATION_TO_RUN'],
     $_ENV['COMMAND_TEMPLATE'],
-    $handle,
     $_ENV['MESSAGE_VISIBILITY_TIMEOUT'],
     $_ENV['POLL_TIME']
 );
 
 [$iterations, $duration] = $massdriver();
 
-print("Logfile: $tmpfname\n");
 print("Exiting run - final number of iterations: $iterations, final duration of run: $duration\n");

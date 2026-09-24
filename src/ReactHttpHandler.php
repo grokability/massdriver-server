@@ -27,7 +27,6 @@ class ReactHttpHandler // I would definitely *feel* better if we had an actual '
 
     public function __invoke(RequestInterface $request, array $options = []): GuzzlePromiseInterface
     {
-        print "ReactHttpHandler was INVOKED!!!!\n";
         $timer = null;
         $transfer = null;
         $promise = new GuzzlePromise(
@@ -41,7 +40,6 @@ class ReactHttpHandler // I would definitely *feel* better if we had an actual '
             }
         );
         $send = function () use ($request, $options, $promise, &$transfer, &$timer): void {
-            print "Send closure called!\n";
             $timer = null;
 
             if ($promise->getState() !== GuzzlePromiseInterface::PENDING) {

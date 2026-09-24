@@ -4,34 +4,21 @@ namespace Massdriver;
 
 use Aws\Sqs\SqsClient;
 use Aws\Credentials\Credentials;
+use GuzzleHttp\Promise\PromiseInterface as GuzzlePromiseInterface;
 use React\EventLoop\Loop;
 use React\EventLoop\LoopInterface;
 
 class MassdriverQueue {
-    public static ?self $singleton = null;
-
     public ?LoopInterface $loop = null;
     public ?Credentials $credentials = null;
     public ?SqsClient $sqs_client = null;
     protected int $iterations = 0;
     protected float $start_time = 0.0;
     protected bool $draining = false;
-    protected bool $sqs_request_pending = false;
+    protected ?GuzzlePromiseInterface $sqs_request_pending = null;
     protected \Closure $signal_handler;
 
     const int MAX_SQS_MESSAGE_COUNT = 10;
-
-    public static function new_slots_available()
-    {
-        // this is weird and janky and will break if we move to more than one queue
-        $mdq = self::$singleton;
-        //spin up a SQS queue reader if we don't have one already!
-        //crap, i need an *instance* to find out if we have an SQS Queue operation in progress or not.
-        if($mdq->draining || $mdq->sqs_request_pending) {
-            return;
-        }
-        $mdq->QueueReceiveLoop();
-    }
 
     function __construct(
         public string $queue_name,
@@ -39,13 +26,9 @@ class MassdriverQueue {
         public int $max_iterations,
         public int $max_duration,
         public string $command_template,
-        public mixed $log_stream,
         public int $visibility_timeout = 30,
         public int $poll_time = 20,
     ) {
-        if(static::$singleton) {
-            throw new \Exception("Queue already initialized!!!\n");
-        }
         //NOTE: THIS IS *SYNCHRONOUS*
         $this->loop = Loop::get();
         ReactGuzzleTaskQueue::install($this->loop);
@@ -59,33 +42,54 @@ class MassdriverQueue {
         // I _was_ thinking about doing some kind of 'credentials adapter' here, because refreshing tokens
         // *might* block for a few seconds, sometimes. But I think we can just live with it.
 
-        Task::boot($this->loop, $this->sqs_client, $this->queue_name, $this->max_concurrency, $this->log_stream);
+        Task::boot($this->loop, $this->sqs_client, $this->queue_name, $this->max_concurrency,$this);
         $this->signal_handler = function () {
             if($this->draining) {
                 print "Second Interrupt Signal Detected, exiting *NOW*\n";
                 exit(1);
             }
-            print "Interrupt Signal Detected! Allowing tasks to finish. (Hit Ctrl+C again to force exit)";
+            print "Interrupt Signal Detected! Allowing tasks to finish. (Hit Ctrl+C again to force exit)\n";
             $this->draining = true;
+            if($this->sqs_request_pending) {
+                print "Canceling Pending SQS request...\n";
+                $this->sqs_request_pending->cancel();
+            }
+            $this->loop->addPeriodicTimer(1,function () {
+                if(Task::slots_remaining() == $this->max_concurrency) {
+                    print "Stopping loop...\n";
+                    $this->stop();
+                } else {
+                    print "Waiting for ".Task::slots_remaining()." task(s) to complete\n";
+                }
+            });
         };
         $this->loop->addSignal(SIGINT,$this->signal_handler);
         $this->start_time = microtime(true);
         $this->QueueReceiveLoop();
-        static::$singleton = $this;
     }
 
     function nothing_left_to_do() {
         return Task::slots_remaining() == $this->max_concurrency && !$this->sqs_request_pending;
     }
 
+    function there_are_more_slots_available(int $slots) {
+        if ($slots != Task::slots_remaining()) {
+            print "Task::class has let us know that there are $slots more slots available, but the real count is: ".Task::slots_remaining()."; running QueueReceiveLoop()\n";
+        }
+        $this->QueueReceiveLoop();
+    }
+
     function QueueReceiveLoop() {
         if($this->draining && $this->nothing_left_to_do()) {
+            print "Draining *and* nothing left to do; stopping.\n";
             $this->stop();
         }
         if($this->draining) {
+            print "Just draining. That's fine? Still, not going to do SQS stuff.\n";
             return;
         }
         if(Task::slots_remaining() == 0) {
+            print "No slots remaining. No need to talk to SQS right now.\n";
             return;
         }
         if($this->iterations >= $this->max_iterations || microtime(true)-$this->start_time > $this->max_duration) {
@@ -110,11 +114,11 @@ class MassdriverQueue {
             'VisibilityTimeout' => (int) $this->visibility_timeout,
         ];
         $this->iterations++;
-        $this->sqs_request_pending = true;
-        print("Sending SQS Message for: ".$params['MaxNumberOfMessages']."\n");
-        $this->sqs_client->receiveMessageAsync($params)->then(function ($results) {
-            print("SQS response received!\n");
-            $this->sqs_request_pending = false;
+        print("Asking SQS for: ".$params['MaxNumberOfMessages']." messages.\n");
+
+        $this->sqs_request_pending = $this->sqs_client->receiveMessageAsync($params)->then(function ($results) {
+            print("SQS response received! Count: ".count($results->get('Messages') ?? [])."\n");
+            $this->sqs_request_pending = null;
             foreach( $results->get('Messages') ?? [] as $message) {
                 $payload = json_decode($message['Body'], true, 8, JSON_THROW_ON_ERROR);
                 print_r($payload);
