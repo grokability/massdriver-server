@@ -2,35 +2,62 @@
 
 namespace Massdriver;
 
-use Aws\Sts\StsClient;
 use Dotenv\Dotenv;
+use Massdriver\ReactAws\ReactAws;
 use React\EventLoop\LoopInterface;
+use React\Promise\Promise;
 use React\Stream\ReadableResourceStream;
 use function React\Promise\all;
-use function React\Promise\resolve;
 
 class FederatedClientCredentialsRefresher
 {
-    public static array $credentials_array;
-    protected static StsClient $sts_client;
+    protected static array $credentials_array;
+    protected ReactAws $sts_client;
+
+    const array IMPORTANT_CREDENTIALS = [
+        'AWS_ACCESS_KEY_ID',
+        'AWS_SECRET_ACCESS_KEY',
+        'AWS_SESSION_TOKEN',
+        '_SESSION_EXPIRATION'
+    ];
+
 
     public function __construct(
+        protected LoopInterface $loop,
         public string $directory,
     ) {
-        // SYNCHRONOUS constructor! Do not run in event loop
-        foreach(glob("/var/www/snipe-host/*/.env") as $env_file) {
-            $params = Dotenv::createArrayBacked($env_file)->load();
-            $important_credentials = [
-                'AWS_ACCESS_KEY_ID',
-                'AWS_SECRET_ACCESS_KEY',
-                'AWS_SESSION_TOKEN',
-                '_SESSION_EXPIRATION'
-            ];
-            static::$credentials_array[$env_file] = array_intersect_something($important_credentials, $params);
-        }
+        $this->sts_client = new ReactAws($this->loop,'Sts',[
+            'version' => '2011-06-15',
+        ]);
+
+        $refresh_time = $this->reload_credentials_sync();
+        $this->loop->addTimer()
+        $this->loop->addSignal(SIGHUP,fn () => $this->reload_credentials_sync());
     }
 
-    public function run(LoopInterface $loop)
+    public function reload_credentials_sync(): float
+    {
+        $soonest_refresh = PHP_FLOAT_MAX;
+        foreach(glob("/var/www/snipe-host/*/.env") as $env_file) {
+            //maybe delegate this stuff to run()? Use this just to get the slug list
+            $params = Dotenv::createArrayBacked($env_file)->load();
+            $important_params = [];
+            foreach($params as $env_var_name => $value) {
+                if(in_array($env_var_name,self::IMPORTANT_CREDENTIALS)) {
+                    $important_params[$env_var_name] = $value;
+                    if($env_var_name == '_SESSION_EXPIRATION') {
+                        if($value < $soonest_refresh) {
+                            $soonest_refresh = $value;
+                        }
+                    }
+                }
+            }
+            static::$credentials_array[$env_file] = $important_params;
+        }
+        return $soonest_refresh;
+    }
+
+    public function run()
     {
         //first, refresh everything that needs refreshing in a loop.
         $now = microtime(true);
@@ -38,27 +65,47 @@ class FederatedClientCredentialsRefresher
         $promises = [];
         foreach(static::$credentials_array as $slug => $credentials) {
             if($credentials['_SESSION_EXPIRATION'] <= $now-something) {
-                $reader = new ReadableResourceStream($env_filename); //then...readmore...until eof?
-                $token_fetcher = resolve(self::$sts_client->getFederationTokenAsync([
+                $reader = new Promise($this->loop, function () use ($env_filename) {
+                    $stream = new ReadableResourceStream($env_filename);
+                    $stream->on('data',function ($chunk) {
 
-                ])->otherwise($retry_with_timeout_and_possible_failure); //we *may* have this already? If so, then that's great!
-
-                $promises[$slug] = all(['reader' => $reader,'token_fetcher' => $token_fetcher])->then(function ($results) use ($loop,&$soonest_expiration) {
-                    //the entire .env (probably) has been read into memory, and we have a new token.
-
-                    //first, find the lines with the 'important bits' and yank those bits.
-
-                    if($new_expiration < $soonest_expiration) {
-                        $soonest_expiration = $new_expiration;
-                    }
+                        //append data to...where?
+                        //and maybe I can do the 'search' for the keys *right here* - though if a key got broken up
+                        //due to a stream buffer, we might not catch it unless we're careful.
+                        //I think the bit to note is that we want to grep *out* the sensitive vars
+                    });
+                    $stream->on('end', /* actually resolve myself? */);
+                    $stream->on('error', /* reject myself? */);
                 });
+                $token_fetcher = $this->sts_client->getFederationTokenAsync([
+                    'DurationSeconds' => A_LOnG_TIME,
+                    'Name' => $slug,
+                    'Policy' => $inline_policy,
+                    'PolicyArns' => [
+                        ['arn' => $string],
+                        ['arn' => $string],
+                    ]
+                ])->catch($retry_with_timeout_and_possible_failure); //we *may* have this already? If so, then that's great!
+
+                $promises[$slug] = all(['reader' => $reader,'token_fetcher' => $token_fetcher])->then(
+                    function ($results) use (&$soonest_expiration) {
+                        //the entire .env has been read into memory, *and* we have a new token.
+
+                        //first, find the lines with the 'important bits' and yank those bits.
+                        foreach(dfsdsf)
+
+                        if($new_expiration < $soonest_expiration) {
+                            $soonest_expiration = $new_expiration;
+                        }
+                    }
+                );
             }
         }
 
         $outcomes = [];
 
         foreach ($promises as $key => $promise) {
-            $outcomes[$key] = resolve($promise)->then(
+            $outcomes[$key] = $promise->then(
                 static fn ($value) => $value,
                 static fn (\Throwable $reason) => $reason,
             );

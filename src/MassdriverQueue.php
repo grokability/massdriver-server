@@ -4,23 +4,23 @@ namespace Massdriver;
 
 use Aws\Sqs\SqsClient;
 use Aws\Credentials\Credentials;
-use GuzzleHttp\Promise\PromiseInterface as GuzzlePromiseInterface;
-use React\EventLoop\Loop;
+use Massdriver\ReactAws\ReactAws;
 use React\EventLoop\LoopInterface;
+use React\Promise\PromiseInterface;
 
 class MassdriverQueue {
-    public ?LoopInterface $loop = null;
     public ?Credentials $credentials = null;
-    public ?SqsClient $sqs_client = null;
+    public SqsClient|ReactAws|null $sqs_client = null; //dual-signature is just for better type-hinting, I guess?
     protected int $iterations = 0;
     protected float $start_time = 0.0;
     protected bool $draining = false;
-    protected ?GuzzlePromiseInterface $sqs_request_pending = null;
+    protected ?PromiseInterface $sqs_request_pending = null;
     protected \Closure $signal_handler;
 
     const int MAX_SQS_MESSAGE_COUNT = 10;
 
     function __construct(
+        protected LoopInterface $loop,
         public string $queue_name,
         public int $max_concurrency,
         public int $max_iterations,
@@ -31,13 +31,9 @@ class MassdriverQueue {
         public int $poll_time = 20,
     ) {
         //NOTE: THIS IS *SYNCHRONOUS*
-        $this->loop = Loop::get();
-        ReactGuzzleTaskQueue::install($this->loop);
-        print("Selected 'Loop' type: ".get_class($this->loop)."\n");
 
-        $this->sqs_client = new SqsClient([
+        $this->sqs_client = new ReactAws($this->loop, 'Sqs',[
             'version' => '2012-11-05',
-            'http_handler' => new ReactHttpHandler($this->loop),
         ]);
 
         // I _was_ thinking about doing some kind of 'credentials adapter' here, because refreshing tokens

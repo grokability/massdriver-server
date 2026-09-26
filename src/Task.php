@@ -3,16 +3,17 @@
 namespace Massdriver;
 
 use Aws\Sqs\SqsClient;
+use Massdriver\ReactAws\ReactAws;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\TimerInterface;
-use GuzzleHttp\Promise\PromiseInterface as GuzzlePromise;
+use React\Promise\PromiseInterface;
 use React\Stream\WritableResourceStream;
 
 class Task
 {
     protected static int $max_processes = 0;
     protected static LoopInterface $loop;
-    protected static SqsClient $sqs_client;
+    protected static ReactAws $sqs_client;
     protected static string $queue_url;
     protected static mixed $error_stream;
     protected static MassdriverQueue $queue;
@@ -31,7 +32,7 @@ class Task
 
     public static function boot(
         LoopInterface $loop,
-        SqsClient $sqs_client,
+        ReactAws $sqs_client,
         string $queue_url,
         int $max_processes,
         MassdriverQueue $queue,
@@ -136,7 +137,7 @@ class Task
         );
     }
 
-    public function change_visibility_window(int $new_window): GuzzlePromise
+    public function change_visibility_window(int $new_window): PromiseInterface
     {
         return static::$sqs_client->changeMessageVisibilityAsync([
             'QueueUrl' => static::$queue_url,

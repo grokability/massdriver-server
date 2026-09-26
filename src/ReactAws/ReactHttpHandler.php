@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-namespace Massdriver;
+namespace Massdriver\ReactAws;
 
 use GuzzleHttp\Promise\Promise as GuzzlePromise;
 use GuzzleHttp\Promise\CancellationException as GuzzleCancellationException;
