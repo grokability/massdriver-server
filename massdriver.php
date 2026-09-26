@@ -10,6 +10,7 @@ $dotenv->required(['SQS_QUEUE','AWS_REGION','COMMAND_TEMPLATE']);
 $dotenv->required(['TIMES_TO_RUN','DURATION_TO_RUN','MAX_CONCURRENCY','POLL_TIME','MESSAGE_VISIBILITY_TIMEOUT'])->isInteger();
 
 use Aws\Sts\StsClient;
+use Massdriver\FederatedClientCredentialsRefresher;
 use Massdriver\MassdriverQueue;
 
 $sts = new StsClient([
@@ -41,6 +42,12 @@ if(!empty($argv[1])) {
 
 print("Starting Massdriver...".($dev_mode ? "IN DEV MODE": "")."\n");
 
+//synchronously read /var/www/snipe-host/{TENANT}
+$refresher = null;
+if($_ENV['DIRECTORY_OF_ENV_VARS']) {
+    $refresher = new FederatedClientCredentialsRefresher($_ENV['DIRECTORY_OF_ENV_VARS']);
+}
+
 $massdriver = new MassdriverQueue(
     $_ENV['SQS_QUEUE'],
     $_ENV['MAX_CONCURRENCY'],
@@ -51,6 +58,9 @@ $massdriver = new MassdriverQueue(
     $_ENV['MESSAGE_VISIBILITY_TIMEOUT'],
     $_ENV['POLL_TIME']
 );
+if($refresher) {
+    $massdriver->attach($refresher);
+}
 
 [$iterations, $duration] = $massdriver();
 

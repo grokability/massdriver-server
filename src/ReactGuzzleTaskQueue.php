@@ -10,8 +10,8 @@ use React\EventLoop\LoopInterface;
 /** Schedules Guzzle continuations on demand, without polling the task queue. */
 class ReactGuzzleTaskQueue implements TaskQueueInterface
 {
-    private bool $scheduled = false;
-    private int $runDepth = 0;
+    private bool $will_fire_next_tick = false;
+    private bool $is_running = false;
 
     private function __construct(
         private LoopInterface $loop,
@@ -51,26 +51,26 @@ class ReactGuzzleTaskQueue implements TaskQueueInterface
     {
         // Keep explicit run() usable for Guzzle's synchronous wait paths,
         // including a wait invoked from within another queued callback.
-        $this->runDepth++;
+        $this->is_running = true;
         try {
             $this->queue->run();
-            $this->runDepth--;
+            $this->is_running = false;
         } catch (\Throwable $e) {
             // If a raw task threw, remaining work still (maybe) gets another tick.
             print "A Guzzle task threw: $e\nRe-scheduling ";
-            $this->runDepth--; //have to call this first otherwise the schedule() command will just return
+            $this->is_running = false; //have to call this first otherwise the schedule() command will just return
             $this->schedule();
         }
     }
 
     private function schedule(): void
     {
-        if ($this->scheduled || $this->runDepth > 0 || $this->queue->isEmpty()) {
+        if ($this->will_fire_next_tick || $this->is_running || $this->queue->isEmpty()) {
             return;
         }
-        $this->scheduled = true;
+        $this->will_fire_next_tick = true;
         $this->loop->futureTick(function (): void {
-            $this->scheduled = false;
+            $this->will_fire_next_tick = false;
             $this->run();
         });
     }
