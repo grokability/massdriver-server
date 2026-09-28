@@ -12,7 +12,7 @@ $dotenv->required(['TIMES_TO_RUN','DURATION_TO_RUN','MAX_CONCURRENCY','POLL_TIME
 use Aws\Sts\StsClient;
 use Massdriver\MassdriverQueue;
 use Massdriver\FederatedClientCredentialsRefresher;
-use React\EventLoop\Loop;
+use Revolt\EventLoop;
 
 $sts = new StsClient([
     'version' => '2011-06-15',
@@ -43,17 +43,15 @@ if(!empty($argv[1])) {
 
 print("Starting Massdriver...".($dev_mode ? "IN DEV MODE": "")."\n");
 
-$loop = Loop::get(); //the 'base' massdriver.php creates and "owns" the loop
-print("Selected 'Loop' type: ".get_class($this->loop)."\n");
+print("Selected loop: ".get_class(EventLoop::getDriver())."\n");
 
-//synchronously read /var/www/snipe-host/{TENANT}
+//Load tenant credentials using Amp filesystem operations.
 $refresher = null;
-if($_ENV['DIRECTORY_OF_ENV_VARS']) {
-    $refresher = new FederatedClientCredentialsRefresher($loop, $_ENV['DIRECTORY_OF_ENV_VARS']);
+if(!empty($_ENV['DIRECTORY_OF_ENV_VARS'])) {
+    $refresher = new FederatedClientCredentialsRefresher($_ENV['DIRECTORY_OF_ENV_VARS']);
 }
 
 $massdriver = new MassdriverQueue(
-    $loop,
     $_ENV['SQS_QUEUE'],
     $_ENV['MAX_CONCURRENCY'],
     $_ENV['TIMES_TO_RUN'],
@@ -64,6 +62,10 @@ $massdriver = new MassdriverQueue(
     $_ENV['POLL_TIME']
 );
 
-[$iterations, $duration] = $massdriver();
+try {
+    [$iterations, $duration] = $massdriver();
+} finally {
+    $refresher?->close();
+}
 
 print("Exiting run - final number of iterations: $iterations, final duration of run: $duration\n");

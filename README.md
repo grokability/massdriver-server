@@ -6,8 +6,9 @@ that is *outside* of the payload should be able to work, once we hook it togethe
 
 In your Laravel apps, you will need to install the Massdriver client and configure it in each app's `.env` file.
 
-Massdriver is not a full Laravel application. But it does use two composer libraries: the AWS SDK, and DotEnv. So you
-will need to run `composer install` to install those dependencies.
+Massdriver uses the AWS SDK, DotEnv, and Amp on the Revolt event loop. Run
+`composer install` to install the locked dependencies. The source requires PHP 8.3+;
+the current lock file requires PHP 8.4.1+ (including its existing Symfony dependency).
 
 For the server configuration, see our [.env.example](/.env.example) file. You can supply configuration in Environment 
 variables, or in a `.env` file - whichever makes the most sense in your environment. You can also set AWS variables like 

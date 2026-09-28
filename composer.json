@@ -19,11 +19,19 @@
         "aws/aws-sdk-php": "^3.394",
         "vlucas/phpdotenv": "^5.7",
         "ext-pcntl": "*",
-        "react/event-loop": "^1.6",
-        "react/http": "^1.11",
         "guzzlehttp/guzzle": "^7.8.2",
         "guzzlehttp/psr7": "^2.6.3",
         "guzzlehttp/promises": "^2.0.3",
-        "react/async": "^4.3"
+        "php": "^8.3",
+        "amphp/amp": "^3.1",
+        "amphp/http-client": "^5.3",
+        "amphp/process": "^2.1",
+        "amphp/byte-stream": "^2.1",
+        "amphp/file": "^3.2",
+        "revolt/event-loop": "^1.0"
+    },
+    "scripts": {
+        "test": "@php tests/amp-integration.php",
+        "lint": "@php tests/lint.php"
     }
 }
