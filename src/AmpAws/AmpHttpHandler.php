@@ -44,7 +44,7 @@ final class AmpHttpHandler
                 if (($options['delay'] ?? 0) > 0) {
                     delay($options['delay'] / 1000, cancellation: $token);
                 }
-                $timeout = (float) ($options['timeout'] ?? 30);
+                $timeout = (float) ($options['timeout'] ?? 30); //FIXME - I think this is wrong
                 if ($timeout > 0) {
                     $token = new CompositeCancellation($token, new TimeoutCancellation($timeout));
                 }
@@ -52,6 +52,7 @@ final class AmpHttpHandler
                 $transfer->setHeaders($request->getHeaders());
                 $transfer->setTcpConnectTimeout((float) ($options['connect_timeout'] ?? 5));
                 $transfer->setTransferTimeout((float) ($options['timeout'] ?? 30));
+                $transfer->setInactivityTimeout(30); // FIXME !
                 $response = $this->client->request($transfer, $token);
                 $body = $response->getBody()->buffer($token);
                 if ($promise->getState() === PromiseInterface::PENDING) {
@@ -62,7 +63,7 @@ final class AmpHttpHandler
                     $promise->reject(['exception' => $error, 'connection_error' => !($error instanceof \InvalidArgumentException)]);
                 }
             }
-        })->ignore();
+        }); //->ignore();
         return $promise;
     }
 }

@@ -9,7 +9,7 @@ use Amp\DeferredCancellation;
 use Revolt\EventLoop;
 use function Amp\async;
 
-class MassdriverQueue {
+class MassdriverQueue implements GracefulShutdown {
     public ?Credentials $credentials = null;
     public AmpAws $sqs_client;
     protected int $iterations = 0;
@@ -18,6 +18,7 @@ class MassdriverQueue {
     protected ?Future $sqs_request_pending = null;
     protected string $signal_handler;
     protected ?DeferredCancellation $receive_cancellation = null;
+    protected array $graceful_shutdowns = [];
 
     const int MAX_SQS_MESSAGE_COUNT = 10;
 
@@ -42,6 +43,9 @@ class MassdriverQueue {
         // *might* block for a few seconds, sometimes. But I think we can just live with it.
 
         Task::boot($this->sqs_client, $this->queue_name, $this->max_concurrency,$this);
+        $this->start_time = microtime(true);
+        $this->QueueReceiveLoop();
+
         $this->signal_handler = EventLoop::onSignal(SIGINT, function () {
             if($this->draining) {
                 print "Second Interrupt Signal Detected, exiting *NOW*\n";
@@ -50,16 +54,23 @@ class MassdriverQueue {
             print "Interrupt Signal Detected! Allowing tasks to finish. (Hit Ctrl+C again to force exit)\n";
             $this->graceful_shutdown();
         });
-        $this->start_time = microtime(true);
-        $this->QueueReceiveLoop();
+        EventLoop::unreference($this->signal_handler);
     }
 
     function graceful_shutdown() : void {
         $this->draining = true;
         $this->receive_cancellation?->cancel();
+        foreach($this->graceful_shutdowns as $graceful_shutdown) {
+            $graceful_shutdown->graceful_shutdown();
+        }
         if ($this->nothing_left_to_do()) {
             $this->stop();
         }
+    }
+
+    function register(GracefulShutdown $obj)
+    {
+        $this->graceful_shutdowns[] = $obj;
     }
 
     function nothing_left_to_do() {
@@ -67,14 +78,12 @@ class MassdriverQueue {
     }
 
     function there_are_more_slots_available(int $slots) {
-        if ($slots != Task::slots_remaining()) {
-            print "Task::class has let us know that there are $slots more slots available, but the real count is: ".Task::slots_remaining()."; running QueueReceiveLoop()\n";
-        }
+        print "Task::class has let us know that there are $slots more slots available, bringing us to a total count of: ".Task::slots_remaining()."; running QueueReceiveLoop()\n";
         $this->QueueReceiveLoop();
     }
 
     function QueueReceiveLoop() {
-        if($this->draining && $this->nothing_left_to_do()) {
+        if($this->draining && $this->nothing_left_to_do() ) { //FIXME! Doesn't wait on deletions I don't think? Well, the tasks do...
             print "Draining *and* nothing left to do; stopping.\n";
             $this->stop();
         }
@@ -87,16 +96,8 @@ class MassdriverQueue {
             return;
         }
         if($this->iterations >= $this->max_iterations || microtime(true)-$this->start_time > $this->max_duration) {
-            print("Iterations or duration has elapsed, switching to 'draining'\n");
-            $this->draining = true;
-            if($this->nothing_left_to_do()) {
-                print("Nothing left to do anyways, stopping.\n");
-                $this->stop();
-                return;
-            }
-            // note - each terminating process *will* fire QueueReceiveLoop again,
-            // until the *last* one terminates and fires - then the first check
-            // will pass and the loop will stop.
+            print("Iterations or duration has elapsed, switching to graceful stop\n");
+            $this->graceful_shutdown();
             return;
         }
         if($this->sqs_request_pending) {
@@ -117,7 +118,7 @@ class MassdriverQueue {
         $this->receive_cancellation = new DeferredCancellation();
         $this->sqs_request_pending = async(function () use ($params): void {
             try {
-                $results = $this->sqs_client->receiveMessageAsync($params, $this->receive_cancellation->getCancellation())->await();
+                $results = $this->sqs_client->receiveMessageAsync($params, $this->receive_cancellation->getCancellation());
                 print("SQS response received! Count: ".count($results->get('Messages') ?? [])."\n");
 
                 foreach( $results->get('Messages') ?? [] as $message) {
@@ -177,7 +178,7 @@ class MassdriverQueue {
             } finally {
                 $this->sqs_request_pending = null;
                 $this->receive_cancellation = null;
-                EventLoop::queue(fn () => $this->QueueReceiveLoop());
+                EventLoop::queue(fn () => $this->QueueReceiveLoop()); // FIXME - this doesn't seem right; isn't this *way* too soon?
             }
         });
     }

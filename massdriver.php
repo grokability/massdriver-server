@@ -1,6 +1,10 @@
 <?php
 
 require "vendor/autoload.php";
+\Amp\File\filesystem(
+    new \Amp\File\Driver\BlockingFilesystemDriver()
+);
+//we *HAVE* to do this otherwise it spawns a bunch of filesystem workers - which we don't need
 
 //we have to use 'unsafe' to actually set the environment variables,
 // so that AWS will have access to them.
@@ -48,7 +52,16 @@ print("Selected loop: ".get_class(EventLoop::getDriver())."\n");
 //Load tenant credentials using Amp filesystem operations.
 $refresher = null;
 if(!empty($_ENV['DIRECTORY_OF_ENV_VARS'])) {
-    $refresher = new FederatedClientCredentialsRefresher($_ENV['DIRECTORY_OF_ENV_VARS']);
+    $inline_role = '';
+    if(!empty($_ENV['INLINE_ROLE'])) {
+        $inline_role = $_ENV['INLINE_ROLE'];
+    }
+    $arns = [];
+    if(!empty($_ENV['ROLE_ARNS'])) {
+        $arns = explode(",", $_ENV['ROLE_ARNS']);
+        $arns = array_filter($arns); // yank out 'empty' arrays like [""] which you get by default from explode, above :/
+    }
+    $refresher = new FederatedClientCredentialsRefresher($_ENV['DIRECTORY_OF_ENV_VARS'], $inline_role, $arns);
 }
 
 $massdriver = new MassdriverQueue(
@@ -61,6 +74,8 @@ $massdriver = new MassdriverQueue(
     $_ENV['MESSAGE_VISIBILITY_TIMEOUT'],
     $_ENV['POLL_TIME']
 );
+
+$massdriver->register($refresher);
 
 try {
     [$iterations, $duration] = $massdriver();
