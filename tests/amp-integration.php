@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
+\Amp\File\filesystem(new \Amp\File\Driver\BlockingFilesystemDriver());
+
 use Aws\Sqs\SqsClient;
 use GuzzleHttp\Promise\CancellationException;
 use GuzzleHttp\Promise\Promise;
@@ -26,6 +28,7 @@ function check(bool $condition, string $message): void
 
 $order = [];
 $queue = new AmpGuzzleTaskQueue();
+Utils::queue($queue);
 $queue->add(static function () use (&$order, $queue) {
     $order[] = 'first';
     $queue->add(static function () use (&$order) { $order[] = 'nested'; });
@@ -42,11 +45,15 @@ echo "PASS queue ordering, and idle exit\n";
 $ran = false;
 $queue->add(static function () { throw new RuntimeException('expected'); });
 $queue->add(static function () use (&$ran) { $ran = true; });
+$caught = false;
 try {
     EventLoop::run();
 } catch (\Throwable $error) {
-    check(($error->getPrevious() ?? $error)->getMessage() === 'expected', 'Unexpected queue exception');
+    while ($error->getPrevious() !== null) { $error = $error->getPrevious(); }
+    check($error->getMessage() === 'expected', 'Unexpected queue exception');
+    $caught = true;
 }
+check($caught, 'Raw queue exception was swallowed');
 EventLoop::run();
 check($ran, 'Exception stranded queued work');
 
@@ -56,8 +63,13 @@ $promise->then(static fn () => throw new RuntimeException('handler failure'))
     ->otherwise(static fn () => 'recovered')
     ->then(static function ($value) use (&$recovered) { $recovered = $value; });
 $promise->resolve('start');
-EventLoop::run(); //hrm, this doesn't seem to pick up 'queued' events (not 'deferred'). Or maybe my stuff is broken :)
-//check($recovered === 'recovered', 'Promise rejection recovery stalled: ' . $recovered);
+EventLoop::run();
+check($recovered === 'recovered', 'Promise rejection recovery stalled');
+for ($i = 0; $i < 20; $i++) {
+    $queue->add(static fn () => null);
+    EventLoop::run();
+    check($queue->isEmpty(), 'Repeated queue use retained completed work');
+}
 echo "PASS queue exceptions and Guzzle promise chains\n";
 
 // Only loopback HTTP and dummy AWS keys are used; no AWS requests or credentials.
@@ -81,7 +93,9 @@ async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArri
                 [$head, $body] = explode("\r\n\r\n", $data, 2);
                 preg_match('/Content-Length: (\d+)/i', $head, $length);
                 while (strlen($body) < (int) ($length[1] ?? 0)) {
-                    $body .= $connection->read() ?? '';
+                    $chunk = $connection->read();
+                    if ($chunk === null) { return; }
+                    $body .= $chunk;
                 }
                 preg_match('/^\S+ (\S+)/', $head, $path);
                 preg_match('/Authorization: ([^\r\n]+)/i', $head, $auth);
@@ -142,18 +156,18 @@ try {
         'region' => 'us-east-2', 'version' => '2012-11-05', 'endpoint' => $url,
         'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
     ]);
-    check($wrapper->receiveMessageAsync(['QueueUrl' => $url.'/queue'])->await()['Messages'] === [], 'Amp AWS wrapper failed');
+    check($wrapper->receiveMessageAsync(['QueueUrl' => $url.'/queue'])['Messages'] === [], 'Amp AWS wrapper failed');
 
     $before = count($requests);
     $cancellation = new \Amp\DeferredCancellation();
-    $pending = $wrapper->receiveMessageAsync([
+    $pending = async(fn () => $wrapper->receiveMessageAsync([
         'QueueUrl' => $url.'/queue', '@http' => ['delay' => 1000],
-    ], $cancellation->getCancellation());
+    ], $cancellation->getCancellation()));
     EventLoop::delay(0.01, fn () => $cancellation->cancel());
     try {
         $pending->await(new TimeoutCancellation(2));
         throw new RuntimeException('SDK cancellation unexpectedly succeeded');
-    } catch (CancellationException $expected) {
+    } catch (\Amp\CancelledException|CancellationException $expected) {
     }
     check(count($requests) === $before, 'SDK cancellation did not reach delayed transport');
     echo "PASS cancellation through AWS SDK and Amp Future bridge\n";
@@ -208,33 +222,42 @@ class FakeAws extends AmpAws
     public bool $cancelled = false;
     public int $deletionFailures = 0;
     public function __construct() {}
-    public function receiveMessageAsync(array $params, ?\Amp\Cancellation $cancellation = null): \Amp\Future
+    public float $visibilityDelay = 0;
+    public array $visibilityCompletions = [];
+    public ?DeferredFuture $extensionStarted = null;
+    public ?DeferredFuture $releaseExtension = null;
+    public function receiveMessageAsync(array $params, ?\Amp\Cancellation $cancellation = null): \Aws\Result
     {
         $this->calls[] = ['receive', $params];
-        return async(function () use ($cancellation) {
-            if ($this->slow) {
-                try {
-                    \Amp\delay(10, cancellation: $cancellation);
-                } catch (\Amp\CancelledException $e) {
-                    $this->cancelled = true;
-                    throw $e;
-                }
+        if ($this->slow) {
+            try {
+                \Amp\delay(10, cancellation: $cancellation);
+            } catch (\Amp\CancelledException $e) {
+                $this->cancelled = true;
+                throw $e;
             }
-            $batch = array_shift($this->batches) ?? [];
-            if ($batch instanceof Throwable) { throw $batch; }
-            return new \Aws\Result(['Messages' => $batch]);
-        });
+        }
+        $batch = array_shift($this->batches) ?? [];
+        if ($batch instanceof Throwable) { throw $batch; }
+        return new \Aws\Result(['Messages' => $batch]);
     }
-    public function __call(string $name, array $arguments): \Amp\Future
+    public function __call(string $name, array $arguments): \Aws\Result
     {
         $this->calls[] = [$name, $arguments[0]];
-        return async(function () use ($name) {
-            \Amp\delay(0.01);
-            if ($name === 'deleteMessageAsync' && $this->deletionFailures-- > 0) {
-                throw new RuntimeException('simulated delete failure');
+        \Amp\delay(0.01);
+        if ($name === 'deleteMessageAsync' && $this->deletionFailures-- > 0) {
+            throw new RuntimeException('simulated delete failure');
+        }
+        if ($name === 'changeMessageVisibilityAsync') {
+            $visibility = $arguments[0]['VisibilityTimeout'];
+            if ($visibility > 0) {
+                $this->extensionStarted?->complete();
+                $this->releaseExtension?->getFuture()->await();
+                if ($this->visibilityDelay > 0) { \Amp\delay($this->visibilityDelay); }
             }
-            return new \Aws\Result();
-        });
+            $this->visibilityCompletions[] = $visibility;
+        }
+        return new \Aws\Result();
     }
 }
 
@@ -247,9 +270,9 @@ function message(string $receipt, bool $cron = false): array
         'Body' => json_encode($cron ? ['cmd' => 'test'] : ['data' => ['command' => 'test']]),
     ];
 }
-function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30): \Massdriver\MassdriverQueue
+function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30, int $concurrency = 2): \Massdriver\MassdriverQueue
 {
-    return new \Massdriver\MassdriverQueue('http://localhost/queue', 2, $iterations, 30, $command, $command, $visibility, 0, $aws);
+    return new \Massdriver\MassdriverQueue('http://localhost/queue', $concurrency, $iterations, 30, $command, $command, $visibility, 0, $aws);
 }
 function phpCommand(string $code): string
 {
@@ -290,20 +313,59 @@ try {
     check($aws->cancelled, 'Shutdown did not cancel long polling');
     echo "PASS shutdown cancellation of pending receive\n";
 
-    $directory = sys_get_temp_dir().'/massdriver-'.bin2hex(random_bytes(6));
-    mkdir($directory.'/tenant', 0700, true);
-    file_put_contents($directory.'/tenant/.env', "AWS_ACCESS_KEY_ID=example\n_SESSION_EXPIRATION=2000000000\nIGNORED=value\n");
+    $aws = new FakeAws();
+    $aws->batches = [[message('one')], [message('two')], [message('three')]];
+    daemon($aws, phpCommand('exit(0);'), iterations: 3, concurrency: 1)();
+    check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'receive')) === 3,
+        'Single worker stopped polling before all iterations completed');
+    check(\Massdriver\Task::slots_remaining() === 1, 'Single worker slot was not released');
+    echo "PASS single-worker slot release and continued polling\n";
+
+    // The child waits until an extension is in flight, then fails. Release the
+    // extension only after join() observes exit, making the race deterministic.
+    $marker = tempnam(sys_get_temp_dir(), 'massdriver-exit-');
+    unlink($marker);
     try {
-        $refresher = new \Massdriver\FederatedClientCredentialsRefresher($directory);
-        check($refresher->reload_credentials_sync() === 2000000000.0, 'Async directory loading failed');
-        $refresher->close();
-        EventLoop::run();
+        $aws = new FakeAws();
+        $aws->extensionStarted = new DeferredFuture();
+        $aws->releaseExtension = new DeferredFuture();
+        $aws->batches = [[message('visibility-race')]];
+        $daemon = daemon($aws, phpCommand(
+            'while (!file_exists('.var_export($marker, true).')) { usleep(1000); } exit(7);'
+        ), visibility: 1);
+        async(function () use ($aws, $marker): void {
+            $aws->extensionStarted->getFuture()->await();
+            touch($marker);
+            // Wait for Task's actual termination state, not a guessed process duration.
+            $tasks = new ReflectionProperty(\Massdriver\Task::class, 'processes');
+            $terminating = new ReflectionProperty(\Massdriver\Task::class, 'terminating');
+            while (true) {
+                foreach ($tasks->getValue() as $task) {
+                    if ($terminating->getValue($task)) {
+                        $aws->releaseExtension->complete();
+                        return;
+                    }
+                }
+                \Amp\delay(0.001);
+            }
+        });
+        $daemon();
+        check($aws->visibilityCompletions === [2, 0], 'In-flight extension overwrote the failure reset');
     } finally {
-        unlink($directory.'/tenant/.env');
-        rmdir($directory.'/tenant');
-        rmdir($directory);
+        if (is_file($marker)) { unlink($marker); }
     }
-    echo "PASS Amp filesystem credential loading and idle exit\n";
+    echo "PASS in-flight visibility extension finishes before failure reset\n";
+
+    $aws = new FakeAws();
+    $daemon = daemon($aws, phpCommand('exit(0);'));
+    $listener = new class implements \Massdriver\GracefulShutdown {
+        public int $calls = 0;
+        public function graceful_shutdown(): void { $this->calls++; }
+    };
+    $daemon->register($listener);
+    $daemon();
+    check($listener->calls === 1, 'Registered component did not receive graceful shutdown');
+    echo "PASS registered graceful-shutdown component\n";
 } finally {
     EventLoop::cancel($watchdog);
 }
