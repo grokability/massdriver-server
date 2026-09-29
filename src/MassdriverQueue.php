@@ -29,7 +29,7 @@ class MassdriverQueue implements GracefulShutdown {
         public int $max_duration,
         public string $command_template,
         public string $cron_template,
-        public int $visibility_timeout = 30,
+        public int $visibility_timeout = -1,
         public int $poll_time = 20,
         ?AmpAws $sqs_client = null,
     ) {
@@ -42,6 +42,22 @@ class MassdriverQueue implements GracefulShutdown {
         // I _was_ thinking about doing some kind of 'credentials adapter' here, because refreshing tokens
         // *might* block for a few seconds, sometimes. But I think we can just live with it.
 
+        if($visibility_timeout === -1 || $poll_time === -1) {
+            // calculate from queue metadata
+            $queue_metadata = $this->sqs_client->getQueueAttributesAsync([
+                'AttributeNames' => ['All'],
+                'QueueUrl' => $this->queue_name,
+            ]); // synchronous, but deliberately so.
+            // print($queue_metadata."\n");
+            if($visibility_timeout === -1) {
+                $this->visibility_timeout = $queue_metadata['Attributes']['VisibilityTimeout'];
+                print "Discovered visibility timeout of: ".$this->visibility_timeout."\n";
+            }
+            if($poll_time === -1) {
+                $this->poll_time = $queue_metadata['Attributes']['ReceiveMessageWaitTimeSeconds'];
+                print "Discovered maximum poll duration of: ".$this->poll_time."\n";
+            }
+        }
         Task::boot($this->sqs_client, $this->queue_name, $this->max_concurrency,$this);
         $this->start_time = microtime(true);
         $this->QueueReceiveLoop();

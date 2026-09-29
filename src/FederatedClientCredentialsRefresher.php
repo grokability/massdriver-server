@@ -62,12 +62,13 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
         'AWS_SESSION_TOKEN' => 'SessionToken',
         '_SESSION_EXPIRATION' => 'Expiration',
     ];
-    const int MAX_EXPIRATION_THRESHOLD = 3600; //once you have an hour remaining, it's *time*!
 
     public function __construct(
         public string $directory,
         public string $inline_role = '',
         public array $arns = [],
+        public int $credential_duration = 129_600, //TODO - DUPLICATION!
+        public int $refresh_threshold = 3600, //TODO - DUPLICATION!
     )
     {
         print "Constructiong Refresher Object\n";
@@ -87,8 +88,8 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
     function graceful_shutdown(): void
     {
         print "ClientCredentials refresher is gracefully shutting down\n";
-        foreach(static::$refresh_credentials_timers as $slug => $timer) {
-            print "Timer for: $slug -> $timer\n";
+        foreach(static::$refresh_credentials_timers as $timer) {
+            // print "Timer for: $slug -> $timer\n";
             EventLoop::cancel($timer);
         }
     }
@@ -108,10 +109,12 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
         $this->reload = $df->getFuture();
         $futures = [];
         foreach (listFiles($this->directory) as $tenant) {
-            print "looking at tenant: $tenant\n";
+            // print "looking at tenant: $tenant\n";
             $filename = $this->env_path_for_tenant($tenant);
             if (!isFile($filename)) {
+                print "HOPEFULLY DEBUGGING ONLY - no `.env` file for $filename\n";
                 // continue; In any kind of 'prod' environment, this wouldn't happen. But for testing it's at least useful
+                // all that being said; let things roll (IMHO)
             }
             $futures[] = async(function () use ($filename, &$soonest, $tenant) { // parallelize each tenant's 'load'
                 $env_file_stream = readFileStream($filename);
@@ -141,9 +144,9 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
     {
         static $retry_count = 0;
         $credentials = static::$credentials_array[$tenant];
-
+        // print "Single Credential refresh loop for $tenant (retry count: $retry_count)\n";
         $time_remaining_in_token = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true);
-        if ( $time_remaining_in_token < self::MAX_EXPIRATION_THRESHOLD) {
+        if ( $time_remaining_in_token < $this->refresh_threshold ) {
             if(self::$refresh_credentials_timers[$tenant] ?? false) {
                 //determine if that timer is valid, and if so, cancel it?
 
@@ -177,8 +180,12 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
         }
         //now, set up a *new* timer
         $new_time_remaining_in_token = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true);
-        $delay_with_floor = max(0.1,$new_time_remaining_in_token - self::MAX_EXPIRATION_THRESHOLD);
-        $timer_id = EventLoop::delay($delay_with_floor, fn () => $this->single_credential_refresh_loop($tenant));
+        $delay_with_floor = max(0.1,$new_time_remaining_in_token - $this->refresh_threshold);
+        $timer_id = EventLoop::delay($delay_with_floor, function () use ($tenant) {
+            async(fn () => print "Timer for $tenant has fired!\n"); //weird, but necessary to avoid junking up the AWS calls?
+
+            $this->single_credential_refresh_loop($tenant);
+        });
         EventLoop::unreference($timer_id); //don't let timers keep the event loop up
         self::$refresh_credentials_timers[$tenant] = $timer_id;
 
@@ -188,7 +195,7 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
     {
         return async( function () use ($tenant) {
             $params = [
-                'DurationSeconds' => 129_600, //maximum default - might make configurable
+                'DurationSeconds' => $this->credential_duration,
                 'Name' => $tenant,
                 // Policy will get subbed in here for $this->inline_policy (if set)
                 // PolicyArns will get subbed in here for $this->$this->arns (also only if set)
