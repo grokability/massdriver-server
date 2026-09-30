@@ -14,6 +14,7 @@ php tests/run.php integration
 php tests/run.php refresher
 php tests/run.php visibility-race
 php tests/run.php write-failure
+php tests/run.php filesystem
 ```
 
 Tests never load the application's `.env` or contact AWS. The transport case
@@ -21,13 +22,17 @@ uses a loopback HTTP server and explicit dummy AWS keys; it needs permission
 to bind a local socket. Daemon cases run real PHP child processes with fake SQS
 responses. Credential cases use temporary tenant directories and fake STS
 responses, including the SDK's actual `DateTimeResult` expiration type.
-The filesystem driver is blocking, matching the CLI configuration and avoiding
-Amp filesystem worker processes.
+Most cases use the blocking filesystem driver. The `filesystem/parallel` case
+explicitly starts a one-worker pool and shuts it down after testing; this case
+needs permission to create a local IPC socket. Both filesystem cases check real
+reads, writes, metadata preservation, replacement, and
+cleanup after a rendering error. They do not contact AWS.
 
 ## Coverage
 
 | Cases | Behavior |
 | --- | --- |
+| `filesystem/blocking`, `filesystem/parallel` | Filesystem operations honor the selected driver, including metadata, move and failure cleanup |
 | `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP delay, cancellation, timeout and cleanup |
 | `integration/deletion-retry` | Receive recovery, large stdout/stderr drainage, deletion retries and natural drain |
 | `integration/failed-jobs` | Failed job visibility reset, failed cron deletion and early pipe closure |

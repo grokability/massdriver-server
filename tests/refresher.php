@@ -73,6 +73,8 @@ function fixture(string $directory, FakeSts $sts): Refresher
     $refresher->directory = $directory;
     $refresher->inline_role = '{"Version":"2012-10-17","Statement":[]}';
     $refresher->arns = ['arn:aws:iam::123456789012:policy/test'];
+    $refresher->credential_duration = 129_600;
+    $refresher->refresh_threshold = 3600;
     $reflection->getProperty('sts_client')->setValue($refresher, $sts);
     $signal = EventLoop::onSignal(SIGHUP, static function (): void {});
     EventLoop::unreference($signal);
@@ -103,7 +105,6 @@ $cases = [
         $before = stat($path);
         $credentials = $refresher->refresh_one_credential('tenant');
         $write = $refresher->write_one_credential('tenant', $credentials, Future::complete($original));
-        check($write->isComplete(), 'Successful write left its Future pending');
         $write->await();
         $contents = file_get_contents($path);
         $parsed = Dotenv::parse($contents);
@@ -176,7 +177,7 @@ $cases = [
         }
     },
     'reschedule' => static function () use (&$refresher, $path): void {
-        seed($refresher, 'tenant', microtime(true) + Refresher::MAX_EXPIRATION_THRESHOLD + 0.1);
+        seed($refresher, 'tenant', microtime(true) + $refresher->refresh_threshold + 0.1);
         $refresher->single_credential_refresh_loop('tenant');
         // Another actor refreshes credentials before our earlier timer fires.
         file_put_contents($path, '_SESSION_EXPIRATION='.(time() + 7200));

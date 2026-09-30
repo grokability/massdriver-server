@@ -2,50 +2,46 @@
 
 namespace Massdriver;
 
-use Amp\ByteStream\ReadableResourceStream;
-use Amp\ByteStream\WritableResourceStream;
 use Amp\DeferredFuture;
 use Amp\Future;
 use Dotenv\Dotenv;
 use Massdriver\AmpAws\AmpAws;
 use Revolt\EventLoop;
 use function Amp\async;
-use function Amp\ByteStream\buffer;
+use function Amp\File\changeOwner;
+use function Amp\File\changePermissions;
+use function Amp\File\deleteFile;
+use function Amp\File\getStatus;
 use function Amp\File\isFile;
+use function Amp\File\move;
+use function Amp\File\read;
+use function Amp\File\write;
+use function Amp\File\touch;
 use function Amp\File\listFiles;
 use function Amp\Future\await;
 use function Amp\Future\awaitAll;
 
-function readFileStream(string $path): ReadableResourceStream
+function readFileContents(string $path): string
 {
-    if(!isFile($path)){
-        touch($path); // this won't happen in 'real life' - but for testing it's useful
+    if (!isFile($path)) {
+        touch($path); // Preserve creation of missing tenant files.
     }
-    $resource = fopen($path, 'rb');
-
-    if ($resource === false) {
-        throw new \RuntimeException("Unable to open {$path}");
-    }
-
-    return new ReadableResourceStream($resource);
+    return read($path);
 }
 
-function writeFileStream(string $path,?string $same_as_file = null): WritableResourceStream
+function writeFileContents(string $path, string $contents, ?string $same_as_file = null): void
 {
-    $resource = fopen($path, 'w');
-
-    if ($resource === false) {
-        throw new \RuntimeException("Unable to open {$path}");
+    if ($same_as_file !== null) {
+        $status = getStatus($same_as_file);
+        if ($status === null) {
+            throw new \RuntimeException("Unable to read file metadata for {$same_as_file}");
+        }
+        // Apply permissions before writing credentials to the temporary file.
+        touch($path);
+        changeOwner($path, $status['uid'], $status['gid']);
+        changePermissions($path, $status['mode'] & 07777);
     }
-
-    if($same_as_file) {
-        $stat_results = stat($same_as_file);
-        chown($path, $stat_results['uid']) ?: throw new \Exception("Couldn't change owner");
-        chgrp($path, $stat_results['gid']) ?: throw new \Exception("Couldn't change group");
-        chmod($path, $stat_results['mode']) ?: throw new \Exception("Couldn't change mode");
-    }
-
-    return new WritableResourceStream($resource);
+    write($path, $contents);
 }
 
 class FederatedClientCredentialsRefresher implements GracefulShutdown
@@ -117,8 +113,7 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
                 // all that being said; let things roll (IMHO)
             }
             $futures[] = async(function () use ($filename, &$soonest, $tenant) { // parallelize each tenant's 'load'
-                $env_file_stream = readFileStream($filename);
-                $env_file_contents = buffer($env_file_stream);
+                $env_file_contents = readFileContents($filename);
                 $credentials = array_intersect_key(Dotenv::parse($env_file_contents), self::CREDENTIAL_MAP);
                 static::$credentials_array[$tenant] = $credentials; //could be 'empty array' for a new customer?
 
@@ -154,8 +149,7 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
             }
             try {
                 $credential_future = $this->refresh_one_credential($tenant);
-                $env_file_stream = readFileStream($this->env_path_for_tenant($tenant));
-                $env_file_contents = async(fn () => buffer($env_file_stream));
+                $env_file_contents = async(fn () => readFileContents($this->env_path_for_tenant($tenant)));
                 $this->write_one_credential($tenant, $credential_future, $env_file_contents)->await(); //make sure it completed before we write it into memory
                 $credentials = $credential_future->await();
                 self::$credentials_array[$tenant] = $credentials;
@@ -231,57 +225,50 @@ class FederatedClientCredentialsRefresher implements GracefulShutdown
 
     public function write_one_credential(string $tenant, Future $credentials, Future $old_env_file):Future
     {
-        $future = new DeferredFuture();
-        try {
+        return async(function () use ($tenant, $credentials, $old_env_file): void {
+            // Resolve inputs before creating a temporary file.
+            [$env_file_contents, $credentials_contents] = await([$old_env_file, $credentials]);
             $env_file = $this->env_path_for_tenant($tenant);
             $tmp_file = $env_file . ".tmp";
-            $env_stream = writeFileStream($tmp_file,$env_file);
-
-            //this is going to be, like, 4 async writes in a row - key, secret, session, _session_duration
-
-            [$env_file_contents, $credentials_contents] = await([$old_env_file, $credentials]);
-            $env_file_lines = explode("\n", $env_file_contents);
-            foreach ($env_file_lines as $env_file_line) {
-                $pieces = explode("=", $env_file_line, 2);
-                $is_multiline = false;
-                try {
-                    // just trying to parse the individual *line* to see if it validates on its own
-                    // if not, it must be multiline
-                    Dotenv::parse($env_file_line);
-                } catch (\Exception $e) {
-                    $is_multiline = true;
-                }
-                if (count($pieces) == 2 && !$is_multiline) {
-                    // env-assignment mode
-                    [$name, $value] = $pieces;
-                    if (array_key_exists($name, $credentials_contents)) {
-                        $value = '"' . $credentials_contents[$name] . '"';
-                        unset($credentials_contents[$name]); //delete is so we can check at the end if we missed anything
+            try {
+                $updated_contents = '';
+                $env_file_lines = explode("\n", $env_file_contents);
+                foreach ($env_file_lines as $env_file_line) {
+                    $pieces = explode("=", $env_file_line, 2);
+                    $is_multiline = false;
+                    try {
+                        // just trying to parse the individual *line* to see if it validates on its own
+                        // if not, it must be multiline
+                        Dotenv::parse($env_file_line);
+                    } catch (\Exception $e) {
+                        $is_multiline = true;
                     }
-                    $env_stream->write("$name=$value\n");
-                } else {
-                    // 'literal' mode
-                    // (works for comment-lines, blank-lines, and continuations of multi-line variables)
-                    // Luckily, all of our credential elements fit on one line
-                    $env_stream->write($env_file_line . "\n");
+                    if (count($pieces) == 2 && !$is_multiline) {
+                        // env-assignment mode
+                        [$name, $value] = $pieces;
+                        if (array_key_exists($name, $credentials_contents)) {
+                            $value = '"' . $credentials_contents[$name] . '"';
+                            unset($credentials_contents[$name]); //delete is so we can check at the end if we missed anything
+                        }
+                        $updated_contents .= "$name=$value\n";
+                    } else {
+                        // 'literal' mode
+                        // (works for comment-lines, blank-lines, and continuations of multi-line variables)
+                        // Luckily, all of our credential elements fit on one line
+                        $updated_contents .= $env_file_line . "\n";
+                    }
+                }
+                foreach ($credentials_contents as $key => $value) {
+                    $updated_contents .= "$key=\"$value\"\n";
+                }
+                writeFileContents($tmp_file, $updated_contents, $env_file);
+                move($tmp_file, $env_file);
+            } finally {
+                if (isFile($tmp_file)) {
+                    deleteFile($tmp_file);
                 }
             }
-            foreach ($credentials_contents as $key => $value) {
-                $env_stream->write("$key=\"$value\"\n");
-            }
-            $env_stream->end();
-            if (!rename($tmp_file, $env_file)) {
-                throw new \Exception("Failed to rename $env_file to $env_file");
-            }
-            $future->complete();
-        } catch (\Exception $e) {
-            if(is_file($tmp_file)) {
-                unlink($tmp_file);
-            }
-            $future->error($e);
-        }
-
-        return $future->getFuture();
+        });
     }
 
     public function close(): void

@@ -4,6 +4,9 @@ declare(strict_types=1);
 // Fresh PHP processes isolate static task state, timers, signals and deliberate
 // failure paths. Every case runs even if an earlier one fails.
 $cases = [];
+foreach (['blocking', 'parallel'] as $name) {
+    $cases['filesystem/'.$name] = ['filesystem.php', $name];
+}
 foreach (['transport', 'deletion-retry', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener'] as $name) {
     $cases['integration/'.$name] = ['amp-integration.php', $name];
 }
