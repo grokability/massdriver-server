@@ -31,7 +31,7 @@
         "revolt/event-loop": "^1.0"
     },
     "scripts": {
-        "test": "@php tests/amp-integration.php",
+        "test": "@php tests/run.php",
         "lint": "@php tests/lint.php"
     }
 }
