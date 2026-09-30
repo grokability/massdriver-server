@@ -35,6 +35,8 @@ cleanup after a rendering error. They do not contact AWS.
 | `filesystem/blocking`, `filesystem/parallel` | Filesystem operations honor the selected driver, including metadata, move and failure cleanup |
 | `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP delay, cancellation, timeout and cleanup |
 | `integration/deletion-retry` | Receive recovery, large stdout/stderr drainage, deletion retries and natural drain |
+| `integration/malformed-batch` | A malformed message does not prevent later messages in the batch from running |
+| `integration/zero-iterations`, `invalid-concurrency` | Clean startup/shutdown at zero iterations and rejection of zero worker capacity |
 | `integration/failed-jobs` | Failed job visibility reset, failed cron deletion and early pipe closure |
 | `integration/visibility` | Long-running job visibility extension |
 | `integration/shutdown` | Cancelling an outstanding receive |
@@ -43,8 +45,11 @@ cleanup after a rendering error. They do not contact AWS.
 | `integration/shutdown-listener` | Registered components receive graceful shutdown |
 | `refresher/mapping` | Credentials, expiration, inline policy, policy ARNs and tenant tags |
 | `refresher/write-success` | Completed Future, replaced and appended keys, unrelated content and file metadata preservation |
+| `refresher/newlines` | Repeated writes stay stable for empty, LF/CRLF credential-only and mixed files; accumulated credential-only blank lines are removed |
 | `refresher/write-failure`, `write-error-cleanup` | Original-file preservation and temporary-file cleanup for both Exceptions and Errors |
 | `refresher/multiline` | Credential-looking text inside a multiline value stays literal |
+| `refresher/duplicate-keys`, `malformed-write` | Duplicate assignments are updated and malformed input cannot replace the original file |
+| `refresher/concurrent-refresh`, `retry-reset` | Overlapping renewal/reload requests share work and successful renewal resets backoff |
 | `refresher/load`, `load-error` | Loading valid credentials, scheduling renewal, shutdown cleanup and surfacing malformed files |
 | `refresher/backoff`, `retry-isolation` | Failure backoff and independent tenant retry budgets |
 | `refresher/reschedule` | Reloading newer credentials preserves a future renewal after the old deadline |
@@ -58,3 +63,7 @@ filesystem behavior remain outside this suite.
 These are assertions of intended behavior, not snapshots of existing bugs. Known
 production failures are neither skipped nor marked as expected failures. Syntax
 errors in production files will fail affected cases before their assertions run.
+
+Renewal failures retry independently per tenant after 5, 10, 30, 45, then 60
+seconds, remaining at 60 seconds until success or shutdown. Message deletion
+keeps its task slot until deletion succeeds or its five retries are exhausted.

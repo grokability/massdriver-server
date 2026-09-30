@@ -18,9 +18,9 @@ use function Amp\async;
 use function Amp\delay;
 
 /** AWS's PSR-7 / Guzzle transport contract, backed by Amp sockets and DNS. */
-final class AmpHttpHandler
+class AmpHttpHandler
 {
-    private HttpClient $client;
+    protected HttpClient $client;
 
     public function __construct()
     {

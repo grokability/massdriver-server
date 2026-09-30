@@ -53,7 +53,7 @@ function seed(Refresher $refresher, string $tenant, float $expiration): void
 {
     $credentials = state($refresher, 'credentials_array');
     $credentials[$tenant] = ['_SESSION_EXPIRATION' => $expiration];
-    (new ReflectionProperty(Refresher::class, 'credentials_array'))->setValue(null, $credentials);
+    (new ReflectionProperty(Refresher::class, 'credentials_array'))->setValue($refresher, $credentials);
 }
 
 function liveTimers(Refresher $refresher): array
@@ -141,6 +141,41 @@ $cases = [
         $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete($contents))->await();
         $after = Dotenv::parse(file_get_contents($path));
         check($after['NOTES'] === $before['NOTES'] && $after['AWS_ACCESS_KEY_ID'] === 'new', 'Multiline content was mistaken for a credential assignment');
+    },
+    'duplicate-keys' => static function () use (&$refresher, $path): void {
+        $contents = "export AWS_ACCESS_KEY_ID=first\nAWS_ACCESS_KEY_ID=second\n";
+        $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete($contents))->await();
+        check(Dotenv::parse(file_get_contents($path))['AWS_ACCESS_KEY_ID'] === 'new', 'Later duplicate overrode the refreshed credential');
+    },
+    'malformed-write' => static function () use (&$refresher, $path, $original): void {
+        $failed = false;
+        try {
+            $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete('NOTES="unfinished'))->await();
+        } catch (RuntimeException) { $failed = true; }
+        check($failed && file_get_contents($path) === $original, 'Malformed input was written over the original file');
+    },
+    'concurrent-refresh' => static function () use (&$refresher, $sts): void {
+        seed($refresher, 'tenant', 0);
+        $sts->started = new DeferredFuture();
+        $sts->release = new DeferredFuture();
+        $first = async(fn () => $refresher->single_credential_refresh_loop('tenant'));
+        $sts->started->getFuture()->await();
+        $second = async(fn () => $refresher->single_credential_refresh_loop('tenant'));
+        $reload = $refresher->load_credentials_from_disk();
+        delay(0.01);
+        check(count($sts->calls) === 1, 'Overlapping renewal called STS twice');
+        $sts->release->complete();
+        \Amp\Future\await([$first, $second, $reload]);
+        check(count($sts->calls) === 1 && count(liveTimers($refresher)) === 1, 'Reload raced with renewal or duplicated its timer');
+    },
+    'retry-reset' => static function () use (&$refresher, $sts): void {
+        seed($refresher, 'tenant', 0);
+        $sts->failure = new RuntimeException('outage');
+        $refresher->single_credential_refresh_loop('tenant');
+        $refresher->single_credential_refresh_loop('tenant');
+        $sts->failure = null;
+        $refresher->single_credential_refresh_loop('tenant');
+        check(state($refresher, 'retry_counts') === [], 'Successful renewal retained its backoff');
     },
     'load' => static function () use (&$refresher, $sts): void {
         $refresher->load_credentials_from_disk()->await();

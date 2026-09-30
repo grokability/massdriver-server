@@ -34,16 +34,17 @@ When trying to figure out your `COMMAND_TEMPLATE`, you can run in `--dev` mode w
 messages that cause an Exception as immediately re-available, which could force SQS messages into a Dead-Letter Queue.
 
 The `MESSAGE_VISIBILITY_TIMEOUT` environment variable is very important - it determines how long the initial message 
-should take to complete (approximately). The process-management loop will evaluate if the process is still running, and 
+should take to complete (approximately). If not set, it will be detected by querying the SQS queue's attributes. 
+The process-management loop will evaluate if the process is still running, and 
 if there is less than half of the Visibility Timeout, it will double it. For example, let's take a `MESSAGE_VISIBILITY_TIMEOUT` of 30 seconds
 (which is SQS's default). After the resulting process has run for 15 seconds, Massdriver will then extend the timeout by
 60 seconds (total duration: 85 seconds). And then, after 30 more seconds, it will extend by 120, and so on. Using this 
-algorithm, very long-duration tasks can still complete succesfully, and short-lived tasks can still be executed quickly.
+algorithm, very long-duration tasks can still complete successfully, and short-lived tasks can still be executed quickly.
 
 Massdriver is designed to be run under some kind of daemon-management program, like systemd or supervise. It will 
 automatically exit after `TIMES_TO_RUN` executions of the main receive loop, or after having run for `DURATION_TO_RUN` 
 seconds, with plenty of wiggle-room for long-running tasks (so don't get too attached to that duration). Sometimes 
-during testing you might want to fire off massdriver just once, so in that case you can override your `.env`
+during testing you might want to fire off Massdriver just once, so in that case you can override your `.env`
 by prepending `TIMES_TO_RUN=1` or `DURATION_TO_RUN=1` to your command-line invocation so that it will only make one 
 trip through the loop. It will probably work better with regular, non-FIFO queues. And it definitely works much better on a queue
 that is configured for long-polling. You can run multiple copies of it to increase performance, at the cost of more 

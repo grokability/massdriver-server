@@ -7,12 +7,13 @@ $cases = [];
 foreach (['blocking', 'parallel'] as $name) {
     $cases['filesystem/'.$name] = ['filesystem.php', $name];
 }
-foreach (['transport', 'deletion-retry', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener'] as $name) {
+foreach (['transport', 'deletion-retry', 'malformed-batch', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener', 'zero-iterations', 'invalid-concurrency'] as $name) {
     $cases['integration/'.$name] = ['amp-integration.php', $name];
 }
-foreach (['mapping', 'write-success', 'write-failure', 'write-error-cleanup', 'multiline', 'load', 'load-error', 'backoff', 'retry-isolation', 'reschedule', 'shutdown-in-flight'] as $name) {
+foreach (['mapping', 'write-success', 'write-failure', 'write-error-cleanup', 'multiline', 'load', 'load-error', 'backoff', 'retry-isolation', 'reschedule', 'shutdown-in-flight', 'duplicate-keys', 'malformed-write', 'concurrent-refresh', 'retry-reset'] as $name) {
     $cases['refresher/'.$name] = ['refresher.php', $name];
 }
+$cases['refresher/newlines'] = ['refresher-newlines.php', ''];
 $filter = $argv[1] ?? '';
 if ($filter !== '') {
     $cases = array_filter($cases, static fn ($name) => str_contains($name, $filter), ARRAY_FILTER_USE_KEY);

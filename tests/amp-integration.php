@@ -292,6 +292,15 @@ $cases = [
         check(count($deletes) === 3, 'Deletion or retry was abandoned during shutdown');
         echo "PASS receive recovery, output draining, concurrency slots, deletion retry, and graceful drain\n";
     },
+    'malformed-batch' => static function (): void {
+        $aws = new FakeAws();
+        $invalid = message('invalid');
+        $invalid['Body'] = '{invalid json';
+        $aws->batches = [[$invalid, message('valid')]];
+        daemon($aws, phpCommand('exit(0);'))();
+        $deletes = array_values(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync'));
+        check(count($deletes) === 1 && $deletes[0][1]['ReceiptHandle'] === 'valid', 'Malformed message prevented the rest of its batch from running');
+    },
     'failed-jobs' => static function (): void {
         $aws = new FakeAws();
         $aws->batches = [[message('failed'), message('cron-failed', true)]];
@@ -363,10 +372,28 @@ $cases = [
         }
         echo "PASS in-flight visibility extension finishes before failure reset\n";
     },
+    'zero-iterations' => static function (): void {
+        $aws = new FakeAws();
+        $daemon = daemon($aws, phpCommand('exit(0);'), iterations: 0);
+        $listener = new class implements \Massdriver\EventLoopTask {
+            public int $calls = 0;
+            public function graceful_shutdown(): void { $this->calls++; }
+        };
+        $daemon->register($listener);
+        $daemon();
+        $daemon->graceful_shutdown();
+        check($aws->calls === [] && $listener->calls === 1, 'Zero-iteration shutdown polled or missed/duplicated its listener');
+    },
+    'invalid-concurrency' => static function (): void {
+        $failed = false;
+        try { daemon(new FakeAws(), '', concurrency: 0); }
+        catch (InvalidArgumentException) { $failed = true; }
+        check($failed, 'Zero concurrency was accepted');
+    },
     'shutdown-listener' => static function (): void {
         $aws = new FakeAws();
         $daemon = daemon($aws, phpCommand('exit(0);'));
-        $listener = new class implements \Massdriver\GracefulShutdown {
+        $listener = new class implements \Massdriver\EventLoopTask {
             public int $calls = 0;
             public function graceful_shutdown(): void { $this->calls++; }
         };
