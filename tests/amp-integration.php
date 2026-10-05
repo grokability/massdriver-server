@@ -26,6 +26,7 @@ function check(bool $condition, string $message): void
     }
 }
 
+if (($argv[1] ?? 'transport') === 'transport') {
 $order = [];
 $queue = new AmpGuzzleTaskQueue();
 Utils::queue($queue);
@@ -213,6 +214,9 @@ EventLoop::run();
 check($queue->isEmpty(), 'Work remained after cleanup');
 echo "PASS cleanup and natural loop exit without a polling timer\n";
 
+exit(0);
+}
+
 // Real child processes with a fake SQS boundary exercise the daemon lifecycle.
 class FakeAws extends AmpAws
 {
@@ -222,7 +226,6 @@ class FakeAws extends AmpAws
     public bool $cancelled = false;
     public int $deletionFailures = 0;
     public function __construct() {}
-    public float $visibilityDelay = 0;
     public array $visibilityCompletions = [];
     public ?DeferredFuture $extensionStarted = null;
     public ?DeferredFuture $releaseExtension = null;
@@ -253,7 +256,6 @@ class FakeAws extends AmpAws
             if ($visibility > 0) {
                 $this->extensionStarted?->complete();
                 $this->releaseExtension?->getFuture()->await();
-                if ($this->visibilityDelay > 0) { \Amp\delay($this->visibilityDelay); }
             }
             $this->visibilityCompletions[] = $visibility;
         }
@@ -278,94 +280,135 @@ function phpCommand(string $code): string
 {
     return escapeshellarg(PHP_BINARY).' -r '.escapeshellarg($code);
 }
+$cases = [
+    'deletion-retry' => static function (): void {
+        $aws = new FakeAws();
+        $aws->batches = [new RuntimeException('receive failure'), [message('a'), message('b')]];
+        $aws->deletionFailures = 1;
+        $daemon = daemon($aws, phpCommand('fwrite(STDOUT, str_repeat("x", 200000)); fwrite(STDERR, str_repeat("y", 200000));'), 2);
+        [$iterations] = $daemon();
+        check($iterations === 2 && \Massdriver\Task::slots_remaining() === 2, 'Receive recovery or concurrency slots failed');
+        $deletes = array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync');
+        check(count($deletes) === 3, 'Deletion or retry was abandoned during shutdown');
+        echo "PASS receive recovery, output draining, concurrency slots, deletion retry, and graceful drain\n";
+    },
+    'malformed-batch' => static function (): void {
+        $aws = new FakeAws();
+        $invalid = message('invalid');
+        $invalid['Body'] = '{invalid json';
+        $aws->batches = [[$invalid, message('valid')]];
+        daemon($aws, phpCommand('exit(0);'))();
+        $deletes = array_values(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync'));
+        check(count($deletes) === 1 && $deletes[0][1]['ReceiptHandle'] === 'valid', 'Malformed message prevented the rest of its batch from running');
+    },
+    'failed-jobs' => static function (): void {
+        $aws = new FakeAws();
+        $aws->batches = [[message('failed'), message('cron-failed', true)]];
+        daemon($aws, phpCommand('fclose(STDOUT); fclose(STDERR); exit(7);'))();
+        check(\Massdriver\Task::slots_remaining() === 2, 'Failed tasks leaked slots');
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 0)) === 1, 'Failed job was not released');
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync' && $c[1]['ReceiptHandle'] === 'cron-failed')) === 1, 'Failed cron was not deleted');
+        echo "PASS failed jobs, cron failure deletion, and early pipe closure\n";
+    },
+    'visibility' => static function (): void {
+        $aws = new FakeAws();
+        $aws->batches = [[message('long')]];
+        daemon($aws, phpCommand('usleep(650000);'), visibility: 1)();
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 2)) === 1, 'Visibility was not extended');
+        echo "PASS visibility extension and timer cleanup\n";
+    },
+    'shutdown' => static function (): void {
+        $aws = new FakeAws();
+        $aws->slow = true;
+        $daemon = daemon($aws, phpCommand('exit(0);'));
+        EventLoop::delay(0.02, fn () => $daemon->graceful_shutdown());
+        $daemon();
+        check($aws->cancelled, 'Shutdown did not cancel long polling');
+        echo "PASS shutdown cancellation of pending receive\n";
+    },
+    'single-worker' => static function (): void {
+        $aws = new FakeAws();
+        $aws->batches = [[message('one')], [message('two')], [message('three')]];
+        daemon($aws, phpCommand('exit(0);'), iterations: 3, concurrency: 1)();
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'receive')) === 3,
+            'Single worker stopped polling before all iterations completed');
+        check(\Massdriver\Task::slots_remaining() === 1, 'Single worker slot was not released');
+        echo "PASS single-worker slot release and continued polling\n";
+    },
+    'visibility-race' => static function (): void {
+        // The child waits until an extension is in flight, then fails. Release the
+        // extension only after join() observes exit, making the race deterministic.
+        $marker = tempnam(sys_get_temp_dir(), 'massdriver-exit-');
+        unlink($marker);
+        try {
+            $aws = new FakeAws();
+            $aws->extensionStarted = new DeferredFuture();
+            $aws->releaseExtension = new DeferredFuture();
+            $aws->batches = [[message('visibility-race')]];
+            $daemon = daemon($aws, phpCommand(
+                '$deadline = microtime(true) + 10; while (!file_exists('.var_export($marker, true).')) { '
+                .'if (microtime(true) > $deadline) { exit(99); } usleep(1000); } exit(7);'
+            ), visibility: 1);
+            async(function () use ($aws, $marker): void {
+                $aws->extensionStarted->getFuture()->await();
+                touch($marker);
+                // Wait for Task's actual termination state, not a guessed process duration.
+                $tasks = new ReflectionProperty(\Massdriver\Task::class, 'processes');
+                $terminating = new ReflectionProperty(\Massdriver\Task::class, 'terminating');
+                while (true) {
+                    foreach ($tasks->getValue() as $task) {
+                        if ($terminating->getValue($task)) {
+                            $aws->releaseExtension->complete();
+                            return;
+                        }
+                    }
+                    \Amp\delay(0.001);
+                }
+            });
+            $daemon();
+            check($aws->visibilityCompletions === [2, 0], 'In-flight extension overwrote the failure reset');
+        } finally {
+            if (is_file($marker)) { unlink($marker); }
+        }
+        echo "PASS in-flight visibility extension finishes before failure reset\n";
+    },
+    'zero-iterations' => static function (): void {
+        $aws = new FakeAws();
+        $daemon = daemon($aws, phpCommand('exit(0);'), iterations: 0);
+        $listener = new class implements \Massdriver\EventLoopTask {
+            public int $calls = 0;
+            public function graceful_shutdown(): void { $this->calls++; }
+        };
+        $daemon->register($listener);
+        $daemon();
+        $daemon->graceful_shutdown();
+        check($aws->calls === [] && $listener->calls === 1, 'Zero-iteration shutdown polled or missed/duplicated its listener');
+    },
+    'invalid-concurrency' => static function (): void {
+        $failed = false;
+        try { daemon(new FakeAws(), '', concurrency: 0); }
+        catch (InvalidArgumentException) { $failed = true; }
+        check($failed, 'Zero concurrency was accepted');
+    },
+    'shutdown-listener' => static function (): void {
+        $aws = new FakeAws();
+        $daemon = daemon($aws, phpCommand('exit(0);'));
+        $listener = new class implements \Massdriver\EventLoopTask {
+            public int $calls = 0;
+            public function graceful_shutdown(): void { $this->calls++; }
+        };
+        $daemon->register($listener);
+        $daemon();
+        check($listener->calls === 1, 'Registered component did not receive graceful shutdown');
+        echo "PASS registered graceful-shutdown component\n";
+    },
+];
+$case = $argv[1] ?? '';
+if (!isset($cases[$case])) { throw new RuntimeException('Unknown integration case: '.$case); }
 $watchdog = EventLoop::delay(20, static fn () => throw new RuntimeException('Daemon test stalled'));
 EventLoop::unreference($watchdog);
 try {
-    $aws = new FakeAws();
-    $aws->batches = [new RuntimeException('receive failure'), [message('a'), message('b')]];
-    $aws->deletionFailures = 1;
-    $daemon = daemon($aws, phpCommand('fwrite(STDOUT, str_repeat("x", 200000)); fwrite(STDERR, str_repeat("y", 200000));'), 2);
-    [$iterations] = $daemon();
-    check($iterations === 2 && \Massdriver\Task::slots_remaining() === 2, 'Receive recovery or concurrency slots failed');
-    $deletes = array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync');
-    check(count($deletes) === 3, 'Deletion or retry was abandoned during shutdown');
-    echo "PASS receive recovery, output draining, concurrency slots, deletion retry, and graceful drain\n";
-
-    $aws = new FakeAws();
-    $aws->batches = [[message('failed'), message('cron-failed', true)]];
-    daemon($aws, phpCommand('fclose(STDOUT); fclose(STDERR); exit(7);'))();
-    check(\Massdriver\Task::slots_remaining() === 2, 'Failed tasks leaked slots');
-    check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 0)) === 1, 'Failed job was not released');
-    check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync' && $c[1]['ReceiptHandle'] === 'cron-failed')) === 1, 'Failed cron was not deleted');
-    echo "PASS failed jobs, cron failure deletion, and early pipe closure\n";
-
-    $aws = new FakeAws();
-    $aws->batches = [[message('long')]];
-    daemon($aws, phpCommand('usleep(650000);'), visibility: 1)();
-    check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 2)) === 1, 'Visibility was not extended');
-    echo "PASS visibility extension and timer cleanup\n";
-
-    $aws = new FakeAws();
-    $aws->slow = true;
-    $daemon = daemon($aws, phpCommand('exit(0);'));
-    EventLoop::delay(0.02, fn () => $daemon->graceful_shutdown());
-    $daemon();
-    check($aws->cancelled, 'Shutdown did not cancel long polling');
-    echo "PASS shutdown cancellation of pending receive\n";
-
-    $aws = new FakeAws();
-    $aws->batches = [[message('one')], [message('two')], [message('three')]];
-    daemon($aws, phpCommand('exit(0);'), iterations: 3, concurrency: 1)();
-    check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'receive')) === 3,
-        'Single worker stopped polling before all iterations completed');
-    check(\Massdriver\Task::slots_remaining() === 1, 'Single worker slot was not released');
-    echo "PASS single-worker slot release and continued polling\n";
-
-    // The child waits until an extension is in flight, then fails. Release the
-    // extension only after join() observes exit, making the race deterministic.
-    $marker = tempnam(sys_get_temp_dir(), 'massdriver-exit-');
-    unlink($marker);
-    try {
-        $aws = new FakeAws();
-        $aws->extensionStarted = new DeferredFuture();
-        $aws->releaseExtension = new DeferredFuture();
-        $aws->batches = [[message('visibility-race')]];
-        $daemon = daemon($aws, phpCommand(
-            'while (!file_exists('.var_export($marker, true).')) { usleep(1000); } exit(7);'
-        ), visibility: 1);
-        async(function () use ($aws, $marker): void {
-            $aws->extensionStarted->getFuture()->await();
-            touch($marker);
-            // Wait for Task's actual termination state, not a guessed process duration.
-            $tasks = new ReflectionProperty(\Massdriver\Task::class, 'processes');
-            $terminating = new ReflectionProperty(\Massdriver\Task::class, 'terminating');
-            while (true) {
-                foreach ($tasks->getValue() as $task) {
-                    if ($terminating->getValue($task)) {
-                        $aws->releaseExtension->complete();
-                        return;
-                    }
-                }
-                \Amp\delay(0.001);
-            }
-        });
-        $daemon();
-        check($aws->visibilityCompletions === [2, 0], 'In-flight extension overwrote the failure reset');
-    } finally {
-        if (is_file($marker)) { unlink($marker); }
-    }
-    echo "PASS in-flight visibility extension finishes before failure reset\n";
-
-    $aws = new FakeAws();
-    $daemon = daemon($aws, phpCommand('exit(0);'));
-    $listener = new class implements \Massdriver\GracefulShutdown {
-        public int $calls = 0;
-        public function graceful_shutdown(): void { $this->calls++; }
-    };
-    $daemon->register($listener);
-    $daemon();
-    check($listener->calls === 1, 'Registered component did not receive graceful shutdown');
-    echo "PASS registered graceful-shutdown component\n";
+    $cases[$case]();
 } finally {
     EventLoop::cancel($watchdog);
 }

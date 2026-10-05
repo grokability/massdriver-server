@@ -8,7 +8,9 @@ foreach (['src', 'tests'] as $directory) {
         }
     }
 }
+$failed = false;
 foreach ($files as $file) {
     passthru(escapeshellarg(PHP_BINARY).' -l '.escapeshellarg($file), $status);
-    if ($status !== 0) { exit($status); }
+    $failed = $failed || $status !== 0;
 }
+exit($failed ? 1 : 0);

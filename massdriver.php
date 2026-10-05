@@ -1,17 +1,14 @@
 <?php
 
 require "vendor/autoload.php";
-\Amp\File\filesystem(
-    new \Amp\File\Driver\BlockingFilesystemDriver()
-);
-//we *HAVE* to do this otherwise it spawns a bunch of filesystem workers - which we don't need
 
-//we have to use 'unsafe' to actually set the environment variables,
+use Massdriver\Foreperson;
+
+//we have to use 'unsafe' to actually *set* the environment variables,
 // so that AWS will have access to them.
 $dotenv = Dotenv\Dotenv::createUnsafeImmutable(__DIR__);
 $dotenv->safeLoad();
-$dotenv->required(['SQS_QUEUE','AWS_REGION','COMMAND_TEMPLATE']);
-$dotenv->required(['TIMES_TO_RUN','DURATION_TO_RUN','MAX_CONCURRENCY','POLL_TIME','MESSAGE_VISIBILITY_TIMEOUT'])->isInteger();
+$dotenv->required(['AWS_REGION']);
 
 use Aws\Sts\StsClient;
 use Massdriver\MassdriverQueue;
@@ -31,6 +28,10 @@ try {
     print "Error message is:\n ".$e->getMessage().".\nExiting...\n";
     exit(1);
 }
+
+unset($sts);
+unset($identity);
+
 $dev_mode = false;
 if(!empty($argv[1])) {
     if( ! in_array($argv[1],["--dev",'--help'])) {
@@ -40,6 +41,19 @@ if(!empty($argv[1])) {
     }
     if($argv[1] == "--help") {
         print("You can run this in --dev mode, where it won't set queue entries visibility to zero on failure\n");
+        print("Allowed environment variables are: \n\n");
+        print("(Supervisor environment variables:)\n\n");
+        foreach(Foreperson::get_env_var_names() as $foreperson_var) {
+            print "$foreperson_var\n";
+        }
+        print "\n(Queue-specific environment variables:)\n\n";
+        foreach(MassdriverQueue::get_env_var_names() as $massdriver_var) {
+            print "$massdriver_var\n";
+        }
+        print "\n(Credential-fetcher-specific environment variables:)\n\n";
+        foreach(FederatedClientCredentialsRefresher::get_env_var_names() as $fed_cred) {
+            print "$fed_cred\n";
+        }
         exit(1);
     }
     $dev_mode = true;
@@ -49,38 +63,28 @@ print("Starting Massdriver...".($dev_mode ? "IN DEV MODE": "")."\n");
 
 print("Selected loop: ".get_class(EventLoop::getDriver())."\n");
 
-//Load tenant credentials using Amp filesystem operations.
+$foreperson = new Foreperson(...Foreperson::env_to_constructor_params($_ENV));
+
 $refresher = null;
-if(!empty($_ENV['DIRECTORY_OF_ENV_VARS'])) {
-    $inline_role = '';
-    if(!empty($_ENV['INLINE_ROLE'])) {
-        $inline_role = $_ENV['INLINE_ROLE'];
-    }
-    $arns = [];
-    if(!empty($_ENV['ROLE_ARNS'])) {
-        $arns = explode(",", $_ENV['ROLE_ARNS']);
-        $arns = array_filter($arns); // yank out 'empty' arrays like [""] which you get by default from explode, above :/
-    }
-    $refresher = new FederatedClientCredentialsRefresher($_ENV['DIRECTORY_OF_ENV_VARS'], $inline_role, $arns);
+if(isset($_ENV['DIRECTORY_OF_ENV_VARS'])) {
+    $refresher_params = FederatedClientCredentialsRefresher::env_to_constructor_params($_ENV);
+    $refresher = new FederatedClientCredentialsRefresher(...$refresher_params);
+    $foreperson->register($refresher);
 }
 
-$massdriver = new MassdriverQueue(
-    $_ENV['SQS_QUEUE'],
-    $_ENV['MAX_CONCURRENCY'],
-    $_ENV['TIMES_TO_RUN'],
-    $_ENV['DURATION_TO_RUN'],
-    $_ENV['COMMAND_TEMPLATE'],
-    $_ENV['CRON_TEMPLATE'] ?? '',
-    $_ENV['MESSAGE_VISIBILITY_TIMEOUT'],
-    $_ENV['POLL_TIME']
-);
-
-$massdriver->register($refresher);
+$massdriver = null;
+if(isset($_ENV['SQS_QUEUE']) && isset($_ENV['MAX_CONCURRENCY']) && isset($_ENV['COMMAND_TEMPLATE'])) {
+    $massdriver_parameters = MassdriverQueue::env_to_constructor_params($_ENV);
+    //FIXME - does not respect 'dev_mode'?
+    $massdriver = new MassdriverQueue(...$massdriver_parameters);
+    $foreperson->register($massdriver);
+}
 
 try {
-    [$iterations, $duration] = $massdriver();
+    $foreperson();
+    [$iterations, $duration] = $foreperson->get_final_statistics();
 } finally {
-    $refresher?->close();
+    $refresher?->close(); //ugh. FIXME
 }
 
 print("Exiting run - final number of iterations: $iterations, final duration of run: $duration\n");

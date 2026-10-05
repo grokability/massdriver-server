@@ -13,6 +13,7 @@ into bundles of 10, without making things *much* more complicated. We still *do*
 no workers available to execute the tasks in them.
 
 Run `composer test` and `composer lint` with PHP 8.4.1+ for the current lock file.
+See [tests/README.md](tests/README.md) for case filters, isolation, and coverage.
 The integration suite uses loopback HTTP, dummy AWS keys, fake SQS operations,
 real child processes, and temporary tenant files. It never contacts AWS. It checks
 SDK signing/retry, Guzzle scheduling, cancellation, timeouts, process output,

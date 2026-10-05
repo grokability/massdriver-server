@@ -133,7 +133,7 @@ class Task
         ]));
     }
 
-    private function schedule_visibility_extension(): void
+    protected function schedule_visibility_extension(): void
     {
         if (!$this->terminating) {
             $this->visibility_extension_timer = EventLoop::delay(max(0.01, $this->visibility_window / 2), fn () => $this->extend_visibility_window());
@@ -165,18 +165,20 @@ class Task
             return Future::error(new \Exception("No valid receipt handle; cannot delete"));
         }
         return async(function (): void {
-            try {
-                static::$sqs_client->deleteMessageAsync([
-                    'QueueUrl' => static::$queue_url,
-                    'ReceiptHandle' => $this->receipt_handle,
-                ]);
-                $this->receipt_handle = null;
-            } catch (\Throwable $error) {
-                // this *MAY* not be required?
-                if ($this->delete_retries++ < self::MAX_RETRIES) {
-                    EventLoop::delay(5 * $this->delete_retries, fn () => $this->deleteQueuedMessage());
-                } else {
-                    print "Unable to delete message after retries: $error\n";
+            while (true) {
+                try {
+                    static::$sqs_client->deleteMessageAsync([
+                        'QueueUrl' => static::$queue_url,
+                        'ReceiptHandle' => $this->receipt_handle,
+                    ]);
+                    $this->receipt_handle = null;
+                    return;
+                } catch (\Throwable $error) {
+                    if ($this->delete_retries++ >= self::MAX_RETRIES) {
+                        throw $error;
+                    }
+                    // Keep the completion future pending until deletion has settled.
+                    \Amp\delay(5 * $this->delete_retries);
                 }
             }
         });
