@@ -46,15 +46,6 @@ function writeFileContents(string $path, string $contents, ?string $same_as_file
 
 class FederatedClientCredentialsRefresher extends EventLoopTask
 {
-    protected int $iterations = 0;
-    protected array $credentials_array = [];
-    protected array $refresh_credentials_timers = [];
-    protected ?Future $reload = null;
-    protected bool $stopping = false;
-    protected array $refreshing = [];
-    protected array $retry_counts = [];
-    protected AmpAws $sts_client;
-
     const array CREDENTIAL_MAP = [
         'AWS_ACCESS_KEY_ID' => 'AccessKeyId',
         'AWS_SECRET_ACCESS_KEY' => 'SecretAccessKey',
@@ -80,10 +71,18 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         ];
     }
 
+    protected int $refreshes = 0;
+    protected array $credentials_array = [];
+    protected array $refresh_credentials_timers = [];
+    protected ?Future $reload = null;
+    protected bool $stopping = false;
+    protected array $refreshing = [];
+    protected array $retry_counts = [];
+    protected AmpAws $sts_client;
+    protected int $number_of_tenants = 0;
 
-    // TODO - maybe move the instance properties down here, or this up there? Having two
-    // completely separate places to define instance properties seems silly
     public function __construct(
+        /** @noinspection SpellCheckingInspection */
         public string $directory,
         public string $inline_role = '',
         public array $arns = [],
@@ -154,6 +153,8 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                     $this->single_credential_refresh_loop($tenant);
                 });
             }
+            $this->number_of_tenants=count($futures);
+
             // Settle every tenant before reporting failures, so reloads cannot overlap.
             [$errors, $_values] = awaitAll($futures);
             if ($errors) {
@@ -254,14 +255,14 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
 
     public function write_one_credential(string $tenant, Future $credentials, Future $old_env_file):void
     {
-        $this->iterations++;
+        $this->refreshes++;
         // Resolve inputs before creating a temporary file.
         [$env_file_contents, $credentials_contents] = await([$old_env_file, $credentials]);
         $env_file = $this->env_path_for_tenant($tenant);
         $tmp_file = $env_file . ".tmp";
         try {
             // First, 'strip out' any credentials lines. They're all guaranteed to be in exactly *one* line
-            // Double-escape newline tokens so PHP does not turn them into whitespace ignored by /x.
+            // Double-escape newline tokens so PHP does not turn them into whitespace which is ignored by the "/x" option.
             foreach(array_keys(self::CREDENTIAL_MAP) as $aws_name) {
                 $pattern = "/^ # start-of-line
                 $aws_name= # the variable we want in question, *and* its equals-sign
@@ -304,6 +305,8 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
 
     public function get_iterations_count(): int
     {
-        return $this->iterations;
+        // We figure an "iteration" is a full cycle of refreshes, one for every tenant
+        // hence the math below
+        return floor($this->refreshes / $this->number_of_tenants);
     }
 }

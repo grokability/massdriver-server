@@ -9,10 +9,10 @@ use Amp\TimeoutCancellation;
 use Amp\Http\Client\HttpClient;
 use Amp\Http\Client\HttpClientBuilder;
 use Amp\Http\Client\Request;
-use GuzzleHttp\Promise\CancellationException;
-use GuzzleHttp\Promise\Promise;
-use GuzzleHttp\Promise\PromiseInterface;
-use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Promise\CancellationException as GuzzleCancellationException;
+use GuzzleHttp\Promise\Promise as GuzzlePromise;
+use GuzzleHttp\Promise\PromiseInterface as GuzzlePromiseInterface;
+use GuzzleHttp\Psr7\Response as GuzzleResponse;
 use Psr\Http\Message\RequestInterface;
 use function Amp\async;
 use function Amp\delay;
@@ -20,6 +20,8 @@ use function Amp\delay;
 /** AWS's PSR-7 / Guzzle transport contract, backed by Amp sockets and DNS. */
 class AmpHttpHandler
 {
+    public const string CANCELLATION_OPTION = 'massdriver_cancellation';
+
     protected HttpClient $client;
 
     public function __construct()
@@ -27,19 +29,23 @@ class AmpHttpHandler
         $this->client = (new HttpClientBuilder())->followRedirects(0)->retry(0)->build();
     }
 
-    public function __invoke(RequestInterface $request, array $options = []): PromiseInterface
+    public function __invoke(RequestInterface $request, array $options = []): GuzzlePromiseInterface
     {
         $cancellation = new DeferredCancellation();
-        $promise = new Promise(
+        $promise = new GuzzlePromise(
             static function (): void { throw new \LogicException('Await the Amp AWS Future instead of calling Guzzle wait().'); },
             static function () use ($cancellation, &$promise): void {
-                $promise->reject(new CancellationException('Promise has been cancelled'));
+                $promise->reject(new GuzzleCancellationException('Promise has been cancelled'));
                 $cancellation->cancel();
             },
         );
         async(function () use ($request, $options, $promise, $cancellation): void {
+            $requestCancellation = $cancellation->getCancellation();
             try {
-                $token = $cancellation->getCancellation();
+                if (isset($options[self::CANCELLATION_OPTION])) {
+                    $requestCancellation = new CompositeCancellation($requestCancellation, $options[self::CANCELLATION_OPTION]);
+                }
+                $token = $requestCancellation;
                 $token->throwIfRequested();
                 if (($options['delay'] ?? 0) > 0) {
                     delay($options['delay'] / 1000, cancellation: $token);
@@ -55,12 +61,16 @@ class AmpHttpHandler
                 $transfer->setInactivityTimeout(30); // FIXME !
                 $response = $this->client->request($transfer, $token);
                 $body = $response->getBody()->buffer($token);
-                if ($promise->getState() === PromiseInterface::PENDING) {
-                    $promise->resolve(new Response($response->getStatus(), $response->getHeaders(), $body, $response->getProtocolVersion(), $response->getReason()));
+                if ($promise->getState() === GuzzlePromiseInterface::PENDING) {
+                    $promise->resolve(new GuzzleResponse($response->getStatus(), $response->getHeaders(), $body, $response->getProtocolVersion(), $response->getReason()));
                 }
             } catch (\Throwable $error) {
-                if ($promise->getState() === PromiseInterface::PENDING) {
-                    $promise->reject(['exception' => $error, 'connection_error' => !($error instanceof \InvalidArgumentException)]);
+                if ($promise->getState() === GuzzlePromiseInterface::PENDING) {
+                    if ($requestCancellation->isRequested()) {
+                        $promise->reject(new GuzzleCancellationException('Promise has been cancelled'));
+                    } else {
+                        $promise->reject(['exception' => $error, 'connection_error' => !($error instanceof \InvalidArgumentException)]);
+                    }
                 }
             }
         }); //->ignore();

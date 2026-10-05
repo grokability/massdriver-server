@@ -15,7 +15,7 @@ class Task
     protected static int $max_processes = 0;
     protected static AmpAws $sqs_client;
     protected static string $queue_url;
-    protected static MassdriverQueue $queue;
+    protected static SharedQueue $queue;
     protected static array $processes = [];
 
     public string $id;
@@ -33,7 +33,7 @@ class Task
     const int MAX_RETRIES = 5;
     const int BUFFER_SIZE= 65536;
 
-    public static function boot(AmpAws $sqs_client, string $queue_url, int $max_processes, MassdriverQueue $queue)
+    public static function boot(AmpAws $sqs_client, string $queue_url, int $max_processes, SharedQueue $queue)
     {
         static::$sqs_client = $sqs_client;
         static::$queue_url = $queue_url;
