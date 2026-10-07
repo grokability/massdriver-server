@@ -80,8 +80,8 @@ if(isset($_ENV['SQS_QUEUE']) && isset($_ENV['MAX_CONCURRENCY']) && isset($_ENV['
 try {
     $foreperson();
     [$iterations, $duration] = $foreperson->get_final_statistics();
-} finally {
-    $refresher?->close(); //ugh. FIXME
+} catch (\Throwable $e) {
+    print "Fatal Exception encountered: ".$e->getMessage()."\n";
 }
 
 print("Exiting run - final number of iterations: $iterations, final duration of run: $duration\n");

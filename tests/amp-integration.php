@@ -181,13 +181,13 @@ try {
         'region' => 'us-east-2', 'version' => '2012-11-05', 'endpoint' => $url,
         'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
     ]);
-    check($wrapper->receiveMessageAsync(['QueueUrl' => $url.'/queue'])['Messages'] === [], 'Amp AWS wrapper failed');
+    check($wrapper->receiveMessage(['QueueUrl' => $url.'/queue'])['Messages'] === [], 'Amp AWS wrapper failed');
 
     $before = count($requests);
     $cancellation = new \Amp\DeferredCancellation();
     $cancellation->cancel();
     try {
-        $wrapper->receiveMessageAsync(['QueueUrl' => $url.'/queue'], $cancellation->getCancellation());
+        $wrapper->receiveMessage(['QueueUrl' => $url.'/queue'], $cancellation->getCancellation());
         throw new RuntimeException('Already-cancelled SDK request unexpectedly succeeded');
     } catch (\Amp\CancelledException $expected) {
     }
@@ -195,7 +195,7 @@ try {
 
     $before = count($requests);
     $cancellation = new \Amp\DeferredCancellation();
-    $pending = async(fn () => $wrapper->receiveMessageAsync([
+    $pending = async(fn () => $wrapper->receiveMessage([
         'QueueUrl' => $url.'/queue', '@http' => ['delay' => 50],
     ], $cancellation->getCancellation()));
     EventLoop::delay(0.01, fn () => $cancellation->cancel());
@@ -219,7 +219,7 @@ try {
             'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
             'retries' => 1,
         ]);
-        $pending = async(fn () => $cancellableWrapper->receiveMessageAsync([
+        $pending = async(fn () => $cancellableWrapper->receiveMessage([
             'QueueUrl' => $url.'/queue', '@http' => ['timeout' => 5],
         ], $cancellation->getCancellation()));
         $sdkArrived->getFuture()->await(new TimeoutCancellation(2));
@@ -291,15 +291,18 @@ class FakeAws extends AmpAws
     public array $calls = [];
     public array $batches = [];
     public bool $slow = false;
+    public ?Closure $afterReceive = null;
     public bool $cancelled = false;
     public int $deletionFailures = 0;
     public function __construct() {}
     public array $visibilityCompletions = [];
     public ?DeferredFuture $extensionStarted = null;
     public ?DeferredFuture $releaseExtension = null;
-    public function receiveMessageAsync(array $params, ?\Amp\Cancellation $cancellation = null): \Aws\Result
+    public function receiveMessage(array $params, ?\Amp\Cancellation $cancellation = null): \Aws\Result
     {
         $this->calls[] = ['receive', $params];
+        // Even an empty real HTTP response yields while waiting for I/O.
+        \Amp\delay(0.001, cancellation: $cancellation);
         if ($this->slow) {
             try {
                 \Amp\delay(10, cancellation: $cancellation);
@@ -309,17 +312,23 @@ class FakeAws extends AmpAws
             }
         }
         $batch = array_shift($this->batches) ?? [];
-        if ($batch instanceof Throwable) { throw $batch; }
+        if ($batch instanceof Throwable) {
+            if ($this->afterReceive !== null) { EventLoop::queue($this->afterReceive); }
+            throw $batch;
+        }
+        if ($this->afterReceive !== null) {
+            EventLoop::queue($this->afterReceive);
+        }
         return new \Aws\Result(['Messages' => $batch]);
     }
     public function __call(string $name, array $arguments): \Aws\Result
     {
         $this->calls[] = [$name, $arguments[0]];
         \Amp\delay(0.01);
-        if ($name === 'deleteMessageAsync' && $this->deletionFailures-- > 0) {
+        if ($name === 'deleteMessage' && $this->deletionFailures-- > 0) {
             throw new RuntimeException('simulated delete failure');
         }
-        if ($name === 'changeMessageVisibilityAsync') {
+        if ($name === 'changeMessageVisibility') {
             $visibility = $arguments[0]['VisibilityTimeout'];
             if ($visibility > 0) {
                 $this->extensionStarted?->complete();
@@ -340,9 +349,33 @@ function message(string $receipt, bool $cron = false): array
         'Body' => json_encode($cron ? ['cmd' => 'test'] : ['data' => ['command' => 'test']]),
     ];
 }
-function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30, int $concurrency = 2): \Massdriver\SharedQueue
+function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30, int $concurrency = 2): \Massdriver\Foreperson
 {
-    return new \Massdriver\SharedQueue('http://localhost/queue', $concurrency, $iterations, 30, $command, $command, $visibility, 0, $aws);
+    $queue = new \Massdriver\SharedQueue(
+        queue_name: 'http://localhost/queue', max_concurrency: $concurrency,
+        command_template: $command, cron_template: $command,
+        visibility_timeout: $visibility, poll_time: 0, sqs_client: $aws,
+    );
+    $foreperson = new \Massdriver\Foreperson($iterations, 30);
+    $foreperson->register($queue);
+    // Stop after the requested fake responses, rather than waiting for the
+    // supervisor's minute-long accounting interval. Real jobs must still drain.
+    $aws->afterReceive = static function () use ($queue, $foreperson, $iterations): void {
+        if ($queue->get_iterations_count() >= $iterations) {
+            $foreperson->graceful_shutdown();
+        }
+    };
+    return $foreperson;
+}
+function listener(): \Massdriver\EventLoopTask
+{
+    return new class extends \Massdriver\EventLoopTask {
+        public int $calls = 0;
+        public static function get_env_vars(): array { return []; }
+        public function __invoke(): void {}
+        public function get_iterations_count(): int { return 0; }
+        public function graceful_shutdown(): void { $this->calls++; }
+    };
 }
 function phpCommand(string $code): string
 {
@@ -354,9 +387,10 @@ $cases = [
         $aws->batches = [new RuntimeException('receive failure'), [message('a'), message('b')]];
         $aws->deletionFailures = 1;
         $daemon = daemon($aws, phpCommand('fwrite(STDOUT, str_repeat("x", 200000)); fwrite(STDERR, str_repeat("y", 200000));'), 2);
-        [$iterations] = $daemon();
+        $daemon();
+        [$iterations] = $daemon->get_final_statistics();
         check($iterations === 2 && \Massdriver\Task::slots_remaining() === 2, 'Receive recovery or concurrency slots failed');
-        $deletes = array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync');
+        $deletes = array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessage');
         check(count($deletes) === 3, 'Deletion or retry was abandoned during shutdown');
         echo "PASS receive recovery, output draining, concurrency slots, deletion retry, and graceful drain\n";
     },
@@ -366,7 +400,7 @@ $cases = [
         $invalid['Body'] = '{invalid json';
         $aws->batches = [[$invalid, message('valid')]];
         daemon($aws, phpCommand('exit(0);'))();
-        $deletes = array_values(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync'));
+        $deletes = array_values(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessage'));
         check(count($deletes) === 1 && $deletes[0][1]['ReceiptHandle'] === 'valid', 'Malformed message prevented the rest of its batch from running');
     },
     'failed-jobs' => static function (): void {
@@ -374,15 +408,15 @@ $cases = [
         $aws->batches = [[message('failed'), message('cron-failed', true)]];
         daemon($aws, phpCommand('fclose(STDOUT); fclose(STDERR); exit(7);'))();
         check(\Massdriver\Task::slots_remaining() === 2, 'Failed tasks leaked slots');
-        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 0)) === 1, 'Failed job was not released');
-        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessageAsync' && $c[1]['ReceiptHandle'] === 'cron-failed')) === 1, 'Failed cron was not deleted');
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibility' && $c[1]['VisibilityTimeout'] === 0)) === 1, 'Failed job was not released');
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'deleteMessage' && $c[1]['ReceiptHandle'] === 'cron-failed')) === 1, 'Failed cron was not deleted');
         echo "PASS failed jobs, cron failure deletion, and early pipe closure\n";
     },
     'visibility' => static function (): void {
         $aws = new FakeAws();
         $aws->batches = [[message('long')]];
         daemon($aws, phpCommand('usleep(650000);'), visibility: 1)();
-        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibilityAsync' && $c[1]['VisibilityTimeout'] === 2)) === 1, 'Visibility was not extended');
+        check(count(array_filter($aws->calls, fn ($c) => $c[0] === 'changeMessageVisibility' && $c[1]['VisibilityTimeout'] === 2)) === 1, 'Visibility was not extended');
         echo "PASS visibility extension and timer cleanup\n";
     },
     'shutdown' => static function (): void {
@@ -443,10 +477,7 @@ $cases = [
     'zero-iterations' => static function (): void {
         $aws = new FakeAws();
         $daemon = daemon($aws, phpCommand('exit(0);'), iterations: 0);
-        $listener = new class implements \Massdriver\EventLoopTask {
-            public int $calls = 0;
-            public function graceful_shutdown(): void { $this->calls++; }
-        };
+        $listener = listener();
         $daemon->register($listener);
         $daemon();
         $daemon->graceful_shutdown();
@@ -461,14 +492,57 @@ $cases = [
     'shutdown-listener' => static function (): void {
         $aws = new FakeAws();
         $daemon = daemon($aws, phpCommand('exit(0);'));
-        $listener = new class implements \Massdriver\EventLoopTask {
-            public int $calls = 0;
-            public function graceful_shutdown(): void { $this->calls++; }
-        };
+        $listener = listener();
         $daemon->register($listener);
         $daemon();
         check($listener->calls === 1, 'Registered component did not receive graceful shutdown');
         echo "PASS registered graceful-shutdown component\n";
+    },
+    'supervisor-accounting' => static function (): void {
+        $aws = new FakeAws();
+        $queue = new \Massdriver\SharedQueue(
+            queue_name: 'http://localhost/queue', max_concurrency: 1,
+            visibility_timeout: 30, poll_time: 0, sqs_client: $aws,
+        );
+        $foreperson = new class(1, 30) extends \Massdriver\Foreperson {
+            const float ACCOUNTING_PERIOD = 0.01;
+        };
+        $listener = listener();
+        $foreperson->register($queue);
+        $foreperson->register($listener);
+        $before = EventLoop::getIdentifiers();
+        $foreperson();
+        [$iterations, $duration] = $foreperson->get_final_statistics();
+        check($iterations >= 1 && $duration < 1, 'Supervisor did not stop polling at its accounting check');
+        check($listener->calls === 1, 'Accounting shutdown missed or duplicated its listener');
+        check(EventLoop::getIdentifiers() === $before, 'Supervisor left signal or timer handlers behind');
+    },
+    'zero-duration' => static function (): void {
+        $foreperson = new \Massdriver\Foreperson(100, 0);
+        $listener = listener();
+        $foreperson->register($listener);
+        $foreperson();
+        check($listener->calls === 1, 'Zero-duration supervisor did not shut down');
+    },
+    'supervisor-signals' => static function (): void {
+        $aws = new FakeAws();
+        $aws->slow = true;
+        $foreperson = daemon($aws, phpCommand('exit(0);'));
+        $listener = new class extends \Massdriver\EventLoopTask {
+            public int $reloads = 0;
+            public int $shutdowns = 0;
+            public static function get_env_vars(): array { return []; }
+            public function __invoke(): void {}
+            public function get_iterations_count(): int { return 0; }
+            public function reload(): void { $this->reloads++; }
+            public function graceful_shutdown(): void { $this->shutdowns++; }
+        };
+        $foreperson->register($listener);
+        EventLoop::delay(0.01, static function (): void { posix_kill(getmypid(), SIGHUP); });
+        EventLoop::delay(0.03, static function (): void { posix_kill(getmypid(), SIGINT); });
+        $foreperson();
+        check($listener->reloads === 1 && $listener->shutdowns === 1, 'Supervisor did not dispatch reload and shutdown signals');
+        check($aws->cancelled, 'SIGINT did not cancel the pending receive');
     },
 ];
 $case = $argv[1] ?? '';

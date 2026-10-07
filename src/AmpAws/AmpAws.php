@@ -8,7 +8,7 @@ use Aws\AwsClient;
 use Aws\Result;
 use GuzzleHttp\Promise\Utils as GuzzleUtils;
 
-/** AWS Async method names are retained; calls await internally and return AWS Results. */
+/** Ordinary AWS method names await internally and return AWS Results. */
 class AmpAws
 {
     protected AwsClient $client;
@@ -33,6 +33,7 @@ class AmpAws
             $arguments[$params_key]['@http'][AmpHttpHandler::CANCELLATION_OPTION] = $cancellation;
         }
         $deferred = new DeferredFuture();
+        $name .= "Async"; //switches to the Async method, but running synchronously
         $promise = $this->client->$name(...$arguments)->then(
             $deferred->complete(...)
         )->otherwise(
