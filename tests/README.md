@@ -42,23 +42,27 @@ cleanup after a rendering error. They do not contact AWS.
 | `integration/shutdown` | Cancelling an outstanding receive |
 | `integration/single-worker` | Releasing the last slot before restarting polling |
 | `integration/visibility-race` | An extension already in flight must finish before the failure reset; explicit gates coordinate child exit and extension completion |
-| `integration/shutdown-listener` | Registered components receive graceful shutdown |
+| `integration/shutdown-listener`, `supervisor-accounting`, `supervisor-signals`, `zero-duration` | Foreperson dispatches shutdown once, enforces accounting/duration limits, dispatches SIGINT/SIGHUP, and removes its handlers |
 | `refresher/mapping` | Credentials, expiration, inline policy, policy ARNs and tenant tags |
-| `refresher/write-success` | Completed Future, replaced and appended keys, unrelated content and file metadata preservation |
-| `refresher/newlines` | Repeated writes stay stable for empty, LF/CRLF credential-only and mixed files; accumulated credential-only blank lines are removed |
+| `refresher/write-success` | Caller starts credential retrieval; writing returns void after replacing/appending keys while preserving unrelated content and file metadata |
 | `refresher/write-failure`, `write-error-cleanup` | Original-file preservation and temporary-file cleanup for both Exceptions and Errors |
-| `refresher/multiline` | Credential-looking text inside a multiline value stays literal |
-| `refresher/duplicate-keys`, `malformed-write` | Duplicate assignments are updated and malformed input cannot replace the original file |
+| `refresher/duplicate-keys` | Duplicate assignments do not override refreshed credentials |
 | `refresher/concurrent-refresh`, `retry-reset` | Overlapping renewal/reload requests share work and successful renewal resets backoff |
-| `refresher/load`, `load-error` | Loading valid credentials, scheduling renewal, shutdown cleanup and surfacing malformed files |
+| `refresher/load` | Loading valid credentials, scheduling renewal and shutdown cleanup |
 | `refresher/backoff`, `retry-isolation` | Failure backoff and independent tenant retry budgets |
 | `refresher/reschedule` | Reloading newer credentials preserves a future renewal after the old deadline |
 | `refresher/shutdown-in-flight` | A renewal finishing during shutdown must not schedule further work |
+| `refresher/empty` | Iteration counts stay zero before loading and with no tenants |
 
 Credential fixtures bypass the constructor solely to inject fake STS and avoid
 AWS credential discovery. They exercise the real load, refresh, write and shutdown
 methods. Constructor/CLI wiring, live AWS permissions, and deployment-specific
 filesystem behavior remain outside this suite.
+
+Daemon fixtures register the queue with Foreperson and request shutdown after a
+fixed number of fake receive responses, so process tests need not wait for the
+supervisor's normal minute-long accounting interval. `supervisor-accounting`
+separately exercises that production callback with a shorter interval.
 
 These are assertions of intended behavior, not snapshots of existing bugs. Known
 production failures are neither skipped nor marked as expected failures. Syntax

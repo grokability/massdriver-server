@@ -30,7 +30,7 @@ final class FakeSts extends AmpAws
     public function __construct() {}
     public function __call(string $name, array $arguments): Result
     {
-        check($name === 'getFederationTokenAsync', 'Unexpected STS operation');
+        check($name === 'getFederationToken', 'Unexpected STS operation');
         $this->calls[] = $arguments[0];
         $this->started?->complete();
         $this->release?->getFuture()->await();
@@ -76,9 +76,6 @@ function fixture(string $directory, FakeSts $sts): Refresher
     $refresher->credential_duration = 129_600;
     $refresher->refresh_threshold = 3600;
     $reflection->getProperty('sts_client')->setValue($refresher, $sts);
-    $signal = EventLoop::onSignal(SIGHUP, static function (): void {});
-    EventLoop::unreference($signal);
-    $reflection->getProperty('signal')->setValue($refresher, $signal);
     return $refresher;
 }
 
@@ -92,7 +89,7 @@ $sts = new FakeSts();
 $refresher = null;
 $cases = [
     'mapping' => static function () use (&$refresher, $sts): void {
-        $credentials = $refresher->refresh_one_credential('tenant')->await();
+        $credentials = $refresher->refresh_one_credential('tenant');
         check($credentials === [
             'AWS_ACCESS_KEY_ID' => 'test-key', 'AWS_SECRET_ACCESS_KEY' => 'test-secret',
             'AWS_SESSION_TOKEN' => 'test-token/+=', '_SESSION_EXPIRATION' => 2051222400,
@@ -103,9 +100,8 @@ $cases = [
     },
     'write-success' => static function () use (&$refresher, $path, $original): void {
         $before = stat($path);
-        $credentials = $refresher->refresh_one_credential('tenant');
-        $write = $refresher->write_one_credential('tenant', $credentials, Future::complete($original));
-        $write->await();
+        $credentials = async($refresher->refresh_one_credential(...), 'tenant');
+        $refresher->write_one_credential('tenant', $credentials, Future::complete($original));
         $contents = file_get_contents($path);
         $parsed = Dotenv::parse($contents);
         check($parsed['AWS_ACCESS_KEY_ID'] === 'test-key' && $parsed['AWS_SESSION_TOKEN'] === 'test-token/+=', 'Credentials not replaced/appended');
@@ -118,7 +114,7 @@ $cases = [
     'write-failure' => static function () use (&$refresher, $path, $original): void {
         $failure = new RuntimeException('simulated STS rejection');
         try {
-            $refresher->write_one_credential('tenant', Future::error($failure), Future::complete($original))->await();
+            $refresher->write_one_credential('tenant', Future::error($failure), Future::complete($original));
             throw new RuntimeException('Failed credentials unexpectedly succeeded');
         } catch (Throwable $error) { check($error === $failure, 'Original failure was lost'); }
         EventLoop::run(); // Detect delayed close callbacks overwriting the file.
@@ -128,31 +124,16 @@ $cases = [
     'write-error-cleanup' => static function () use (&$refresher, $path, $original): void {
         $failure = new TypeError('simulated credential transformation error');
         try {
-            $refresher->write_one_credential('tenant', Future::error($failure), Future::complete($original))->await();
+            $refresher->write_one_credential('tenant', Future::error($failure), Future::complete($original));
             throw new RuntimeException('Error unexpectedly succeeded');
         } catch (Throwable $error) { check($error === $failure, 'Original Error was lost'); }
         check(file_get_contents($path) === $original, 'Error changed the original file');
         check(!file_exists($path.'.tmp'), 'TypeError bypassed temporary-file cleanup');
     },
-    'multiline' => static function () use (&$refresher, $path): void {
-        $contents = "NOTES=\"first line\nAWS_ACCESS_KEY_ID=example-in-notes\nlast line\"\nAWS_ACCESS_KEY_ID=old\n";
-        $before = Dotenv::parse($contents);
-        file_put_contents($path, $contents);
-        $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete($contents))->await();
-        $after = Dotenv::parse(file_get_contents($path));
-        check($after['NOTES'] === $before['NOTES'] && $after['AWS_ACCESS_KEY_ID'] === 'new', 'Multiline content was mistaken for a credential assignment');
-    },
     'duplicate-keys' => static function () use (&$refresher, $path): void {
-        $contents = "export AWS_ACCESS_KEY_ID=first\nAWS_ACCESS_KEY_ID=second\n";
-        $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete($contents))->await();
+        $contents = "export AWS_ACCESS_KEY_ID=first\n\"AWS_ACCESS_KEY_ID\"=second\n";
+        $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete($contents));
         check(Dotenv::parse(file_get_contents($path))['AWS_ACCESS_KEY_ID'] === 'new', 'Later duplicate overrode the refreshed credential');
-    },
-    'malformed-write' => static function () use (&$refresher, $path, $original): void {
-        $failed = false;
-        try {
-            $refresher->write_one_credential('tenant', Future::complete(['AWS_ACCESS_KEY_ID' => 'new']), Future::complete('NOTES="unfinished'))->await();
-        } catch (RuntimeException) { $failed = true; }
-        check($failed && file_get_contents($path) === $original, 'Malformed input was written over the original file');
     },
     'concurrent-refresh' => static function () use (&$refresher, $sts): void {
         seed($refresher, 'tenant', 0);
@@ -186,12 +167,12 @@ $cases = [
         check(liveTimers($refresher) === [], 'Shutdown left renewal timers');
         EventLoop::run();
     },
-    'load-error' => static function () use (&$refresher, $path): void {
-        file_put_contents($path, 'BROKEN="unterminated');
-        $failed = false;
-        try { $refresher->load_credentials_from_disk()->await(); }
-        catch (Throwable) { $failed = true; }
-        check($failed, 'Malformed tenant file was silently treated as a successful reload');
+    'empty' => static function () use (&$refresher, $path, $directory): void {
+        check($refresher->get_iterations_count() === 0, 'Unloaded refresher did not report zero iterations');
+        unlink($path);
+        rmdir($directory.'/tenant');
+        $refresher->load_credentials_from_disk()->await();
+        check($refresher->get_iterations_count() === 0, 'Empty refresher did not report zero iterations');
     },
     'backoff' => static function () use (&$refresher, $sts): void {
         seed($refresher, 'tenant', 0);

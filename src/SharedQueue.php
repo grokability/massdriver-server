@@ -51,7 +51,7 @@ class SharedQueue extends EventLoopTask {
 
         if($visibility_timeout === -1 || $poll_time === -1) {
             // calculate from queue metadata
-            $queue_metadata = $this->sqs_client->getQueueAttributesAsync([
+            $queue_metadata = $this->sqs_client->getQueueAttributes([
                 'AttributeNames' => ['All'],
                 'QueueUrl' => $this->queue_name,
             ]); // synchronous, but deliberately so.
@@ -110,7 +110,7 @@ class SharedQueue extends EventLoopTask {
         $this->receive_cancellation = new DeferredCancellation();
         $this->sqs_request_pending = async(function () use ($params): void {
             try {
-                $results = $this->sqs_client->receiveMessageAsync($params, $this->receive_cancellation->getCancellation());
+                $results = $this->sqs_client->receiveMessage($params, $this->receive_cancellation->getCancellation());
                 print("SQS response received! Count: ".count($results->get('Messages') ?? [])."\n");
 
                 foreach( $results->get('Messages') ?? [] as $message) {

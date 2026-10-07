@@ -4,6 +4,7 @@ namespace Massdriver;
 
 use Amp\Future;
 use Amp\Process\Process;
+use Aws\Result;
 use Massdriver\AmpAws\AmpAws;
 use Revolt\EventLoop;
 use function Amp\async;
@@ -79,14 +80,14 @@ class Task
             $futures = $this->readers;
 
             if ($this->status === 0 || $this->delete_after_failure) {
-                $futures[] = $this->deleteQueuedMessage();
+                $futures[] = async(fn () => $this->deleteQueuedMessage());
             } else {
                 try {
                     if($this->visibility_update) {
                         // need to make sure the *old* one comes through before the *new* one fires off
                         $this->visibility_update->await();
                     }
-                    $futures[] = $this->change_visibility_window(0);
+                    $futures[] = async(fn () => $this->change_visibility_window(0));
                 } catch(\Throwable $error) {
                     print "Could not reset visibility for failed task: $error\n";
                 };
@@ -123,14 +124,14 @@ class Task
         });
     }
 
-    public function change_visibility_window(int $new_window): Future
+    public function change_visibility_window(int $new_window): Result
     {
         print "Extending visibility window for task ID: ".$this->id." from ".$this->visibility_window." to $new_window\n";
-        return async(fn () => static::$sqs_client->changeMessageVisibilityAsync([
+        return static::$sqs_client->changeMessageVisibility([
             'QueueUrl' => static::$queue_url,
             'ReceiptHandle' => $this->receipt_handle,
             'VisibilityTimeout' => $new_window,
-        ]));
+        ]);
     }
 
     protected function schedule_visibility_extension(): void
@@ -149,7 +150,7 @@ class Task
         $this->visibility_update = async(function (): void {
             try {
                 $new_window = min(43200, max(1, $this->visibility_window * 2));
-                $this->change_visibility_window($new_window)->await(); // await() the response before you change the array
+                $this->change_visibility_window($new_window);
                 $this->visibility_window = $new_window;
             } catch (\Throwable $error) {
                 print "Error changing visibility window: $error\n";
@@ -159,28 +160,26 @@ class Task
         });
     }
 
-    public function deleteQueuedMessage(): Future
+    public function deleteQueuedMessage(): void
     {
         if (!$this->receipt_handle) {
-            return Future::error(new \Exception("No valid receipt handle; cannot delete"));
+            throw new \Exception("No valid receipt handle; cannot delete");
         }
-        return async(function (): void {
-            while (true) {
-                try {
-                    static::$sqs_client->deleteMessageAsync([
-                        'QueueUrl' => static::$queue_url,
-                        'ReceiptHandle' => $this->receipt_handle,
-                    ]);
-                    $this->receipt_handle = null;
-                    return;
-                } catch (\Throwable $error) {
-                    if ($this->delete_retries++ >= self::MAX_RETRIES) {
-                        throw $error;
-                    }
-                    // Keep the completion future pending until deletion has settled.
-                    \Amp\delay(5 * $this->delete_retries);
+        while (true) {
+            try {
+                static::$sqs_client->deleteMessage([
+                    'QueueUrl' => static::$queue_url,
+                    'ReceiptHandle' => $this->receipt_handle,
+                ]);
+                $this->receipt_handle = null;
+                return;
+            } catch (\Throwable $error) {
+                if ($this->delete_retries++ >= self::MAX_RETRIES) {
+                    throw $error;
                 }
+                // Keep the completion future pending until deletion has settled.
+                \Amp\delay(5 * $this->delete_retries);
             }
-        });
+        }
     }
 }

@@ -1,14 +1,14 @@
 # Amp AWS adapter
 
-`AmpAws` exposes SDK operations as AWS Result values. Use SDK method names ending
-in `Async`: the adapter awaits internally and returns an AWS `Result`, not an Amp
+`AmpAws` exposes SDK operations as AWS Result values. Use ordinary SDK method names
+without `Async`: the adapter awaits internally and returns an AWS `Result`, not an Amp
 `Future`. Waiting suspends the current fiber while other event-loop work continues.
 
 Its `AmpHttpHandler` implements the AWS SDK's PSR-7/Guzzle transport boundary using
 Amp HTTP. `AmpGuzzleTaskQueue` connects Guzzle continuations to Revolt. No polling timer is used.
 
 Use `new AmpAws('Sqs', $options)` followed by 
-`$client->receiveMessageAsync($params, $cancellation)`. Any operation can accept an
+`$client->receiveMessage($params, $cancellation)`. Any operation can accept an
 Amp `Cancellation` as its last argument to cancel the underlying HTTP request.
 Calling `Future::await($cancellation)` on an outer Future alone only cancels that
 wait, not the underlying HTTP request.

@@ -49,7 +49,7 @@ try {
     check(\Massdriver\readFileContents($directory.'/created') === '', 'Missing-file creation failed');
     $refresher->write_one_credential('tenant', Future::complete([
         'AWS_ACCESS_KEY_ID' => 'new-key', 'AWS_SESSION_TOKEN' => 'new-token',
-    ]), Future::complete($original))->await();
+    ]), Future::complete($original));
     $updated = file_get_contents($path);
     check(\Dotenv\Dotenv::parse($updated)['AWS_ACCESS_KEY_ID'] === 'new-key', 'Replacement failed');
     clearstatcache(true, $path);
@@ -66,7 +66,7 @@ try {
     try {
         $refresher->write_one_credential('tenant', Future::complete([
             'AWS_ACCESS_KEY_ID' => $badValue,
-        ]), Future::complete($updated))->await();
+        ]), Future::complete($updated));
     } catch (TypeError $error) {
         check($error->getMessage() === 'simulated render error', 'Unexpected failure');
         $failed = true;

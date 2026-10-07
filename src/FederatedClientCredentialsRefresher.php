@@ -184,7 +184,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
             $delay = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true) - $this->refresh_threshold;
             if ($delay <= 0) {
                 try {
-                    $credential_future = $this->refresh_one_credential($tenant);
+                    $credential_future = async(fn () => $this->refresh_one_credential($tenant));
                     $contents = async(fn () => readFileContents($this->env_path_for_tenant($tenant)));
                     $this->write_one_credential($tenant, $credential_future, $contents);
                     $credentials = $credential_future->await();
@@ -215,42 +215,40 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         }
     }
 
-    public function refresh_one_credential(string $tenant): Future
+    public function refresh_one_credential(string $tenant): array
     {
-        return async( function () use ($tenant) {
-            $params = [
-                'DurationSeconds' => $this->credential_duration,
-                'Name' => $tenant,
-                // Policy will get subbed in here for $this->inline_policy (if set)
-                // PolicyArns will get subbed in here for $this->$this->arns (also only if set)
-                'Tags' => [
-                    [
-                        'Key' => 'slug',
-                        'Value' => $tenant,
-                    ]
+        $params = [
+            'DurationSeconds' => $this->credential_duration,
+            'Name' => $tenant,
+            // Policy will get subbed in here for $this->inline_policy (if set)
+            // PolicyArns will get subbed in here for $this->$this->arns (also only if set)
+            'Tags' => [
+                [
+                    'Key' => 'slug',
+                    'Value' => $tenant,
                 ]
-            ];
-            if($this->inline_role) {
-                $params['Policy'] = $this->inline_role;
+            ]
+        ];
+        if($this->inline_role) {
+            $params['Policy'] = $this->inline_role;
+        }
+        if($this->arns) {
+            $policy_arns = [];
+            foreach($this->arns as $arn) {
+                $policy_arns[] = ['arn' => $arn];
             }
-            if($this->arns) {
-                $policy_arns = [];
-                foreach($this->arns as $arn) {
-                    $policy_arns[] = ['arn' => $arn];
-                }
-                $params['PolicyArns'] = $policy_arns;
+            $params['PolicyArns'] = $policy_arns;
+        }
+        $result = $this->sts_client->getFederationToken($params);
+        $credentials = [];
+        $results = $result['Credentials'];
+        foreach(self::CREDENTIAL_MAP as $env_name => $aws_name) {
+            if(array_key_exists($aws_name, $results)) {
+                $credentials[$env_name] = $results[$aws_name];
             }
-            $result = $this->sts_client->getFederationTokenAsync($params);
-            $credentials = [];
-            $results = $result['Credentials'];
-            foreach(self::CREDENTIAL_MAP as $env_name => $aws_name) {
-                if(array_key_exists($aws_name, $results)) {
-                    $credentials[$env_name] = $results[$aws_name];
-                }
-            }
-            $credentials['_SESSION_EXPIRATION'] = strtotime($credentials['_SESSION_EXPIRATION']) ?: 0;
-            return $credentials;
-        });
+        }
+        $credentials['_SESSION_EXPIRATION'] = strtotime($credentials['_SESSION_EXPIRATION']) ?: 0;
+        return $credentials;
     }
 
     public function write_one_credential(string $tenant, Future $credentials, Future $old_env_file):void
@@ -298,15 +296,10 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         }
     }
 
-    public function close(): void
-    {
-        $this->graceful_shutdown();
-    }
-
     public function get_iterations_count(): int
     {
         // We figure an "iteration" is a full cycle of refreshes, one for every tenant
         // hence the math below
-        return floor($this->refreshes / $this->number_of_tenants);
+        return $this->number_of_tenants === 0 ? 0 : (int)floor($this->refreshes / $this->number_of_tenants);
     }
 }

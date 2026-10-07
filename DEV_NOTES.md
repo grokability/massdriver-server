@@ -24,12 +24,13 @@ Amp filesystem loading. No static-analysis configuration exists in this project.
 
 - Amp 3 Futures replace React promises in application code. Await results with
   `->await()`; use `map()` / `catch()` for continuations. Futures are not cancellable
-  promises: pass a Cancellation to `AmpAws::receiveMessageAsync()` to abort a poll.
+  promises: pass a Cancellation to `AmpAws::receiveMessage()` to abort a poll.
 - Revolt owns the global event loop. The first loop argument has been removed from
   `SharedQueue`, `Task::boot`, and `FederatedClientCredentialsRefresher`.
   `Massdriver\AmpAws\AmpAws` replaces `Massdriver\ReactAws\ReactAws` and takes
-  `(string $client_type, array $options = [])`. SDK method names and AWS Results stay
-  the same. An optional AmpAws argument at the end of the queue constructor permits
+  `(string $client_type, array $options = [])`. Call ordinary operation names without
+  `Async`; the wrapper selects SDK async methods internally and returns AWS Results.
+  An optional AmpAws argument at the end of the queue constructor permits
   an isolated test transport.
 - Amp HTTP handles sockets and DNS. AWS keeps ownership of signing, service errors,
   and retries. Guzzle promises remain only at the SDK boundary; continuations are
@@ -50,10 +51,10 @@ Amp filesystem loading. No static-analysis configuration exists in this project.
 
 The federated credential refresher was non-parsing pseudocode before this change.
 Its directory discovery and `.env` reading now use Amp File, honor the configured
-directory, and reload on SIGHUP. Its signal does not keep the daemon alive.
-**It does not issue, renew, or write STS credentials.** Calling `run()` explicitly
-throws until tenant policy, token duration, retry behavior, and safe file updates
-are designed. Do not rely on it for credential renewal.
+directory, and reload through Foreperson on SIGHUP. It requests STS credentials,
+retries failures per tenant, replaces files through a temporary file, and schedules
+renewal with unreferenced timers. Live tenant policies and AWS permissions remain
+outside the local test suite.
 
 AWS credential providers can still block during credential discovery/refresh, as
 can the startup STS identity check. Those paths were not redesigned here.

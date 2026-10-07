@@ -59,7 +59,6 @@ class Foreperson extends EventLoopTask
                 print "Second Interrupt Signal Detected, exiting *NOW*\n";
                 exit(1);
             }
-            $this->shutting_down = true;
             print "Interrupt Signal Detected! Allowing tasks to finish. (Hit Ctrl+C again to force exit)\n";
             $this->graceful_shutdown();
         });
@@ -84,7 +83,7 @@ class Foreperson extends EventLoopTask
         EventLoop::unreference($end_duration);
 
         //
-        $end_iterations = EventLoop::repeat(60, function () {
+        $end_iterations = EventLoop::repeat(static::ACCOUNTING_PERIOD, function () {
             $iterations_count = $this->get_iterations_count();
             print "Iterations checker returns: $iterations_count - but max iterations are: ".$this->max_iterations."\n";
             if($iterations_count >= $this->max_iterations) {
@@ -104,9 +103,13 @@ class Foreperson extends EventLoopTask
 
     public function graceful_shutdown():void
     {
+        if ($this->shutting_down) {
+            return;
+        }
+        $this->shutting_down = true;
         print "Foreperson gracefully shutting down...\n";
         foreach($this->registrations as $system) {
-            async($system->graceful_shutdown(...)); //TODO - I don't know if I really like this syntax?
+            async(fn () => $system->graceful_shutdown());
         }
         // TODO - we can _maybe_ do something where we can introspect each registration to see what it's waiting for?
         // and periodically, print some useful output that could help?
