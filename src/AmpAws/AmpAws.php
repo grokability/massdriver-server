@@ -16,9 +16,9 @@ class AmpAws
     public function __construct(string $client_type, array $options = [])
     {
         GuzzleUtils::queue(new AmpGuzzleTaskQueue());
-        $options['http_handler'] ??= new AmpHttpHandler();
+        $handler = new AmpHttpHandler($options);
         $clientname = 'Aws\\'.$client_type.'\\'.$client_type.'Client';
-        $this->client = new $clientname($options);
+        $this->client = new $clientname($handler->get_options());
     }
 
     public function __call(string $name, array $arguments): Result
@@ -32,6 +32,8 @@ class AmpAws
             // Pass directly to HTTP: SDK promise adoption can break cancel() propagation.
             $arguments[$params_key]['@http'][AmpHttpHandler::CANCELLATION_OPTION] = $cancellation;
         }
+        // The SDK's auth resolver calls wait(); resolve credentials through Amp first.
+        AmpHttpHandler::credentials_future($this->client)->await($cancellation);
         $deferred = new DeferredFuture();
         $name .= "Async"; //switches to the Async method, but running synchronously
         $promise = $this->client->$name(...$arguments)->then(

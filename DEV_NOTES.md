@@ -1,10 +1,5 @@
 # Developer Notes
 
-There are some concerns about credential-renewing (for time-limited credentials such as Instance
-Profiles), but actually coding your way out of that is just too awful, so we don't bother. 
-The server might hiccup for a second or two when it's trying to renew credentials, but
-that won't happen more than once every 8 or so hours, so I think it's fine.
-
 We *don't* use the AWS 'Batch' (deleteMessageBatch(), etc.) commands here. My thinking is
 that different processes are all going to finish at different times, and it's just going to
 take too much work to 'batch' *all* the visibility windows or *all* of the deletes together
@@ -49,15 +44,16 @@ Amp filesystem loading. No static-analysis configuration exists in this project.
 
 ## Existing limitations / follow-up
 
-The federated credential refresher was non-parsing pseudocode before this change.
-Its directory discovery and `.env` reading now use Amp File, honor the configured
+FederatedClientCredntials and `.env` reading now use Amp File, honor the configured
 directory, and reload through Foreperson on SIGHUP. It requests STS credentials,
 retries failures per tenant, replaces files through a temporary file, and schedules
 renewal with unreferenced timers. Live tenant policies and AWS permissions remain
 outside the local test suite.
 
-AWS credential providers can still block during credential discovery/refresh, as
-can the startup STS identity check. Those paths were not redesigned here.
+The startup STS identity check still uses the synchronous SDK. AmpAws's default
+EC2/ECS credential discovery and refresh use Amp HTTP and are awaited before the
+SDK's synchronous authentication checks. Custom credential providers and explicit
+profile configurations may still use their own blocking transports.
 The existing `--dev` flag is still not wired into Task failure handling.
 Live AWS, TLS/proxy deployment settings, and very long jobs approaching SQS's
 12-hour visibility limit still need deployment validation. Task state remains
