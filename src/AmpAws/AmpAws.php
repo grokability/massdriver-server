@@ -8,7 +8,7 @@ use Aws\AwsClient;
 use Aws\Result;
 use GuzzleHttp\Promise\Utils as GuzzleUtils;
 
-/** AWS method names and Result objects are retained; async calls return Amp Futures. */
+/** AWS Async method names are retained; calls await internally and return AWS Results. */
 class AmpAws
 {
     protected AwsClient $client;
@@ -27,6 +27,10 @@ class AmpAws
         $cancellation = null;
         if(end($arguments) instanceof Cancellation) {
             $cancellation = array_pop($arguments); //also *removes* the cancellation so AWS doesn't see it
+            $cancellation->throwIfRequested();
+            $params_key = array_key_exists('args', $arguments) ? 'args' : 0;
+            // Pass directly to HTTP: SDK promise adoption can break cancel() propagation.
+            $arguments[$params_key]['@http'][AmpHttpHandler::CANCELLATION_OPTION] = $cancellation;
         }
         $deferred = new DeferredFuture();
         $promise = $this->client->$name(...$arguments)->then(

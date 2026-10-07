@@ -11,9 +11,8 @@ $dotenv->safeLoad();
 $dotenv->required(['AWS_REGION']);
 
 use Aws\Sts\StsClient;
-use Massdriver\MassdriverQueue;
+use Massdriver\SharedQueue;
 use Massdriver\FederatedClientCredentialsRefresher;
-use Revolt\EventLoop;
 
 $sts = new StsClient([
     'version' => '2011-06-15',
@@ -47,7 +46,7 @@ if(!empty($argv[1])) {
             print "$foreperson_var\n";
         }
         print "\n(Queue-specific environment variables:)\n\n";
-        foreach(MassdriverQueue::get_env_var_names() as $massdriver_var) {
+        foreach(SharedQueue::get_env_var_names() as $massdriver_var) {
             print "$massdriver_var\n";
         }
         print "\n(Credential-fetcher-specific environment variables:)\n\n";
@@ -61,8 +60,6 @@ if(!empty($argv[1])) {
 
 print("Starting Massdriver...".($dev_mode ? "IN DEV MODE": "")."\n");
 
-print("Selected loop: ".get_class(EventLoop::getDriver())."\n");
-
 $foreperson = new Foreperson(...Foreperson::env_to_constructor_params($_ENV));
 
 $refresher = null;
@@ -74,9 +71,9 @@ if(isset($_ENV['DIRECTORY_OF_ENV_VARS'])) {
 
 $massdriver = null;
 if(isset($_ENV['SQS_QUEUE']) && isset($_ENV['MAX_CONCURRENCY']) && isset($_ENV['COMMAND_TEMPLATE'])) {
-    $massdriver_parameters = MassdriverQueue::env_to_constructor_params($_ENV);
+    $massdriver_parameters = SharedQueue::env_to_constructor_params($_ENV);
     //FIXME - does not respect 'dev_mode'?
-    $massdriver = new MassdriverQueue(...$massdriver_parameters);
+    $massdriver = new SharedQueue(...$massdriver_parameters);
     $foreperson->register($massdriver);
 }
 

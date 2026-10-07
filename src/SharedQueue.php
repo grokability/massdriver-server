@@ -9,13 +9,12 @@ use Amp\DeferredCancellation;
 use Revolt\EventLoop;
 use function Amp\async;
 
-class MassdriverQueue extends EventLoopTask {
+class SharedQueue extends EventLoopTask {
     public ?Credentials $credentials = null;
     public AmpAws $sqs_client;
     protected bool $draining = false;
     protected ?Future $sqs_request_pending = null;
     protected ?DeferredCancellation $receive_cancellation = null;
-    protected array $graceful_shutdowns = [];
     protected int $iterations = 0;
 
     const int MAX_SQS_MESSAGE_COUNT = 10;

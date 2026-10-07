@@ -78,12 +78,15 @@ $requests = [];
 $attempts = 0;
 $slowArrived = false;
 $cancelOnArrival = null;
+$sdkArrived = new DeferredFuture();
+$sdkClosed = new DeferredFuture();
+$sdkRetryAttempts = 0;
 $socket = listen('127.0.0.1:0');
 $connections = new SplObjectStorage();
-async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival): void {
+async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts): void {
     while ($connection = $socket->accept()) {
         $connections->attach($connection);
-        async(function () use ($connection, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival): void {
+        async(function () use ($connection, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts): void {
             try {
                 $data = '';
                 while (!str_contains($data, "\r\n\r\n")) {
@@ -101,6 +104,27 @@ async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArri
                 preg_match('/^\S+ (\S+)/', $head, $path);
                 preg_match('/Authorization: ([^\r\n]+)/i', $head, $auth);
                 $requests[] = [$path[1], microtime(true), $auth[1] ?? ''];
+                $requestPath = rtrim($path[1], '/');
+                if (str_starts_with($requestPath, '/sdk-cancel-')) {
+                    if ($requestPath === '/sdk-cancel-retry') {
+                        $sdkRetryAttempts++;
+                        if ($sdkRetryAttempts === 1) {
+                            $body = '{"__type":"InternalError","message":"try again"}';
+                            $connection->write("HTTP/1.1 500 Response\r\nContent-Type: application/x-amz-json-1.0\r\nConnection: close\r\nContent-Length: ".strlen($body)."\r\n\r\n".$body);
+                            return;
+                        }
+                    }
+                    if ($requestPath === '/sdk-cancel-body') {
+                        $connection->write("HTTP/1.1 200 Response\r\nContent-Type: application/x-amz-json-1.0\r\nContent-Length: 100\r\n\r\n{");
+                    }
+                    $sdkArrived->complete();
+                    $chunk = $connection->read();
+                    while ($chunk !== null) {
+                        $chunk = $connection->read();
+                    }
+                    $sdkClosed->complete();
+                    return;
+                }
                 if ($path[1] === '/slow') {
                     $slowArrived = true;
                     $cancelOnArrival?->cancel();
@@ -161,8 +185,18 @@ try {
 
     $before = count($requests);
     $cancellation = new \Amp\DeferredCancellation();
+    $cancellation->cancel();
+    try {
+        $wrapper->receiveMessageAsync(['QueueUrl' => $url.'/queue'], $cancellation->getCancellation());
+        throw new RuntimeException('Already-cancelled SDK request unexpectedly succeeded');
+    } catch (\Amp\CancelledException $expected) {
+    }
+    check(count($requests) === $before, 'Already-cancelled SDK request was sent');
+
+    $before = count($requests);
+    $cancellation = new \Amp\DeferredCancellation();
     $pending = async(fn () => $wrapper->receiveMessageAsync([
-        'QueueUrl' => $url.'/queue', '@http' => ['delay' => 1000],
+        'QueueUrl' => $url.'/queue', '@http' => ['delay' => 50],
     ], $cancellation->getCancellation()));
     EventLoop::delay(0.01, fn () => $cancellation->cancel());
     try {
@@ -170,8 +204,42 @@ try {
         throw new RuntimeException('SDK cancellation unexpectedly succeeded');
     } catch (\Amp\CancelledException|CancellationException $expected) {
     }
+    // Allow the original send deadline to pass, so abandoning the wait cannot pass.
+    \Amp\delay(0.1);
     check(count($requests) === $before, 'SDK cancellation did not reach delayed transport');
     echo "PASS cancellation through AWS SDK and Amp Future bridge\n";
+
+    foreach (['headers', 'body', 'retry'] as $phase) {
+        $sdkArrived = new DeferredFuture();
+        $sdkClosed = new DeferredFuture();
+        $cancellation = new \Amp\DeferredCancellation();
+        $cancellableWrapper = new AmpAws('Sqs', [
+            'region' => 'us-east-2', 'version' => '2012-11-05',
+            'endpoint' => $url.'/sdk-cancel-'.$phase,
+            'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
+            'retries' => 1,
+        ]);
+        $pending = async(fn () => $cancellableWrapper->receiveMessageAsync([
+            'QueueUrl' => $url.'/queue', '@http' => ['timeout' => 5],
+        ], $cancellation->getCancellation()));
+        $sdkArrived->getFuture()->await(new TimeoutCancellation(2));
+        if ($phase === 'retry') {
+            check($sdkRetryAttempts === 2, 'Cancellation test did not reach the retry attempt');
+        }
+        if ($phase === 'body') {
+            // Let Amp consume the headers and start buffering the incomplete body.
+            \Amp\delay(0.01);
+        }
+        $cancellation->cancel();
+        try {
+            $pending->await(new TimeoutCancellation(2));
+            throw new RuntimeException('In-flight SDK cancellation unexpectedly succeeded');
+        } catch (\Amp\CancelledException|CancellationException $expected) {
+        }
+        // Caller cancellation alone is insufficient: the server must observe EOF.
+        $sdkClosed->getFuture()->await(new TimeoutCancellation(1));
+    }
+    echo "PASS SDK cancellation closes HTTP while awaiting headers, body, or a retry response\n";
 
     $started = microtime(true);
     $outcome = runRequest($handler(new Request('GET', $url . '/delayed'), ['delay' => 40]));
@@ -272,9 +340,9 @@ function message(string $receipt, bool $cron = false): array
         'Body' => json_encode($cron ? ['cmd' => 'test'] : ['data' => ['command' => 'test']]),
     ];
 }
-function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30, int $concurrency = 2): \Massdriver\MassdriverQueue
+function daemon(FakeAws $aws, string $command, int $iterations = 1, int $visibility = 30, int $concurrency = 2): \Massdriver\SharedQueue
 {
-    return new \Massdriver\MassdriverQueue('http://localhost/queue', $concurrency, $iterations, 30, $command, $command, $visibility, 0, $aws);
+    return new \Massdriver\SharedQueue('http://localhost/queue', $concurrency, $iterations, 30, $command, $command, $visibility, 0, $aws);
 }
 function phpCommand(string $code): string
 {

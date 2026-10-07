@@ -18,7 +18,6 @@ class Foreperson extends EventLoopTask
     protected array $registrations = [];
     protected bool $shutting_down = false;
     protected float $start_time;
-    protected array $runners = [];
     const float ACCOUNTING_PERIOD = 60.0; // check every minute to see if tasks are complete
 
     public static function get_env_vars(): array
@@ -50,8 +49,7 @@ class Foreperson extends EventLoopTask
         public int $max_duration = 3600,
         public ?Filesystem $filesystem_driver = null,
     ) {
-        //what do we do here? FIXME (if anything)
-        // print out loop type? OR at least select what our loop type is or should be?
+        print("Selected event loop: ".get_class(EventLoop::getDriver())."\n");
     }
 
     public function __invoke():void
@@ -76,7 +74,7 @@ class Foreperson extends EventLoopTask
 
         $this->start_time = microtime(true);
         foreach ($this->registrations as $registration) {
-            $this->runners[] = async(fn () => $registration());
+            async(fn () => $registration());
         }
 
         $end_duration = EventLoop::delay($this->max_duration, function () {
@@ -97,7 +95,6 @@ class Foreperson extends EventLoopTask
         EventLoop::unreference($end_iterations);
 
         EventLoop::run();
-        //awaitAll($runners); // FIXME - what to do here?!
     }
 
     public function register(EventLoopTask $system): void
@@ -111,6 +108,8 @@ class Foreperson extends EventLoopTask
         foreach($this->registrations as $system) {
             async($system->graceful_shutdown(...)); //TODO - I don't know if I really like this syntax?
         }
+        // TODO - we can _maybe_ do something where we can introspect each registration to see what it's waiting for?
+        // and periodically, print some useful output that could help?
     }
 
     public function get_iterations_count(): int
