@@ -4,16 +4,23 @@ declare(strict_types=1);
 namespace Massdriver\AmpAws;
 
 use Amp\DeferredCancellation;
+use Amp\DeferredFuture;
+use Amp\Future;
 use Amp\CompositeCancellation;
 use Amp\TimeoutCancellation;
 use Amp\Http\Client\HttpClient;
 use Amp\Http\Client\HttpClientBuilder;
 use Amp\Http\Client\Request;
+use Aws\AwsClient;
+use Aws\Credentials\CredentialProvider;
+use GuzzleHttp\Exception\RequestException as GuzzleRequestException;
 use GuzzleHttp\Promise\CancellationException as GuzzleCancellationException;
 use GuzzleHttp\Promise\Promise as GuzzlePromise;
 use GuzzleHttp\Promise\PromiseInterface as GuzzlePromiseInterface;
+use GuzzleHttp\Promise\RejectedPromise as GuzzleRejectedPromise;
 use GuzzleHttp\Psr7\Response as GuzzleResponse;
 use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 use function Amp\async;
 use function Amp\delay;
 
@@ -23,10 +30,53 @@ class AmpHttpHandler
     public const string CANCELLATION_OPTION = 'massdriver_cancellation';
 
     protected HttpClient $client;
+    protected array $options;
 
-    public function __construct()
+    public function __construct(array $options = [])
     {
         $this->client = (new HttpClientBuilder())->followRedirects(0)->retry(0)->build();
+        $options['http_handler'] ??= $this;
+        $options['credentials'] ??= $this->credential_provider($options);
+        $this->options = $options;
+    }
+
+    public function get_options(): array
+    {
+        return $this->options;
+    }
+
+    public static function credentials_future(AwsClient $client): Future
+    {
+        $credentials = new DeferredFuture();
+        $client->getCredentials()->then(
+            static fn () => $credentials->complete(),
+            static function ($reason) use ($credentials): void {
+                $credentials->error($reason instanceof \Throwable ? $reason : new \RuntimeException('AWS credential discovery failed'));
+            },
+        );
+        return $credentials->getFuture();
+    }
+
+    protected function credential_provider(array $options): callable
+    {
+        // Role providers use "client", independently of the service HTTP handler.
+        $http_handler = $options['http_handler'];
+        $options['client'] = static function (RequestInterface $request, array $http_options) use ($http_handler): GuzzlePromiseInterface {
+            // The important piece here is that we are using *ourselves* to resolve the credentials - hence the `$http_handler` bit
+            // that is going to call `__invoke()` below
+            return $http_handler($request, $http_options)->then(static function (ResponseInterface $response) use ($request) {
+                // Metadata providers expect Guzzle's HTTP error behavior.
+                if ($response->getStatusCode() >= 400) {
+                    return new GuzzleRejectedPromise([
+                        'exception' => GuzzleRequestException::create($request, $response),
+                        'response' => $response,
+                        'connection_error' => false,
+                    ]);
+                }
+                return $response;
+            });
+        };
+        return CredentialProvider::defaultProvider($options);
     }
 
     public function __invoke(RequestInterface $request, array $options = []): GuzzlePromiseInterface

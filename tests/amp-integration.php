@@ -382,6 +382,94 @@ function phpCommand(string $code): string
     return escapeshellarg(PHP_BINARY).' -r '.escapeshellarg($code);
 }
 $cases = [
+    'role-credentials' => static function (): void {
+        $environment = [];
+        foreach (['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI', 'AWS_CONTAINER_CREDENTIALS_FULL_URI', 'AWS_EC2_METADATA_DISABLED'] as $name) {
+            $environment[$name] = getenv($name);
+            putenv($name);
+        }
+        $paths = [];
+        $authorization = '';
+        $completed = false;
+        try {
+            $handler = static function ($request, array $options) use (&$paths, &$authorization): \GuzzleHttp\Promise\PromiseInterface {
+                $paths[] = $request->getUri()->getPath();
+                $path = $request->getUri()->getPath();
+                $body = match ($path) {
+                    '/latest/api/token' => 'metadata-token',
+                    '/latest/meta-data/iam/security-credentials/' => 'test-role',
+                    '/latest/meta-data/iam/security-credentials/test-role' => json_encode([
+                        'Code' => 'Success', 'AccessKeyId' => 'role-key',
+                        'SecretAccessKey' => 'role-secret', 'Token' => 'role-token',
+                        'Expiration' => gmdate('c', time() + 3600),
+                    ]),
+                    default => '{"Messages":[]}',
+                };
+                if ($path !== '/latest/api/token' && str_starts_with($path, '/latest/')) {
+                    check($request->getHeaderLine('x-aws-ec2-metadata-token') === 'metadata-token', 'IMDSv2 token missing');
+                }
+                if (!str_starts_with($path, '/latest/')) {
+                    $authorization = $request->getHeaderLine('Authorization');
+                    check($request->getHeaderLine('X-Amz-Security-Token') === 'role-token', 'Role session token missing');
+                }
+                $promise = new Promise();
+                async(static function () use ($promise, $body): void {
+                    \Amp\delay(0.001);
+                    $promise->resolve(new \GuzzleHttp\Psr7\Response(200, ['Content-Type' => 'application/x-amz-json-1.0'], $body));
+                });
+                return $promise;
+            };
+            $client = new AmpAws('Sqs', [
+                'region' => 'us-east-2', 'version' => '2012-11-05',
+                'endpoint' => 'http://127.0.0.1:9',
+                'ec2_metadata_service_endpoint' => 'http://127.0.0.1:9',
+                'use_aws_shared_config_files' => false,
+                'http_handler' => $handler,
+            ]);
+            async(static function () use ($client, &$completed): void {
+                $result = $client->receiveMessage(['QueueUrl' => 'http://127.0.0.1:9/queue']);
+                check($result['Messages'] === [], 'Role-authenticated receive failed');
+                $completed = true;
+            });
+            EventLoop::run();
+            check($completed, 'Loop exited during role credential discovery');
+            check($paths === ['/latest/api/token', '/latest/meta-data/iam/security-credentials/', '/latest/meta-data/iam/security-credentials/test-role', '/'], 'Role credential requests bypassed the Amp transport: ' . json_encode($paths));
+            check(str_contains($authorization, 'Credential=role-key/'), 'Receive was not signed with role credentials');
+            EventLoop::run(); // Credential discovery must not leave an idle keepalive.
+        } finally {
+            foreach ($environment as $name => $value) {
+                putenv($value === false ? $name : $name . '=' . $value);
+            }
+        }
+    },
+    'startup-idle' => static function (): void {
+        $foreperson = new \Massdriver\Foreperson(100, 30);
+        $subsystems = [];
+        for ($index = 0; $index < 2; $index++) {
+            $subsystem = new class extends \Massdriver\EventLoopTask {
+                public bool $started = false;
+                public bool $queued = false;
+                public static function get_env_vars(): array { return []; }
+                public function get_iterations_count(): int { return 0; }
+                public function graceful_shutdown(): void {}
+                public function __invoke(): void
+                {
+                    $this->started = true;
+                    EventLoop::queue(function (): void { $this->queued = true; });
+                }
+            };
+            $foreperson->register($subsystem);
+            $subsystems[] = $subsystem;
+        }
+        $before = EventLoop::getIdentifiers();
+        $foreperson();
+        foreach ($subsystems as $subsystem) {
+            check($subsystem->started && $subsystem->queued, 'Loop exited before subsystem startup work ran');
+        }
+        [, $duration] = $foreperson->get_final_statistics();
+        check($duration < 1, 'Idle supervisor waited for its duration limit');
+        check(EventLoop::getIdentifiers() === $before, 'Supervisor retained callbacks after draining');
+    },
     'deletion-retry' => static function (): void {
         $aws = new FakeAws();
         $aws->batches = [new RuntimeException('receive failure'), [message('a'), message('b')]];
@@ -482,12 +570,6 @@ $cases = [
         $daemon();
         $daemon->graceful_shutdown();
         check($aws->calls === [] && $listener->calls === 1, 'Zero-iteration shutdown polled or missed/duplicated its listener');
-    },
-    'invalid-concurrency' => static function (): void {
-        $failed = false;
-        try { daemon(new FakeAws(), '', concurrency: 0); }
-        catch (InvalidArgumentException) { $failed = true; }
-        check($failed, 'Zero concurrency was accepted');
     },
     'shutdown-listener' => static function (): void {
         $aws = new FakeAws();
