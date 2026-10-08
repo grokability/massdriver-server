@@ -36,7 +36,6 @@ cleanup after a rendering error. They do not contact AWS.
 | `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP delay, cancellation, timeout and cleanup |
 | `integration/deletion-retry` | Receive recovery, large stdout/stderr drainage, deletion retries and natural drain |
 | `integration/malformed-batch` | A malformed message does not prevent later messages in the batch from running |
-| `integration/zero-iterations` | Clean startup/shutdown at zero iterations |
 | `integration/failed-jobs` | Failed job visibility reset, failed cron deletion and early pipe closure |
 | `integration/visibility` | Long-running job visibility extension |
 | `integration/shutdown` | Cancelling an outstanding receive |
@@ -44,7 +43,7 @@ cleanup after a rendering error. They do not contact AWS.
 | `integration/role-credentials` | Default EC2 role discovery uses the configured async transport, sends the IMDSv2 token, and signs SQS with the resulting role credentials |
 | `integration/single-worker` | Releasing the last slot before restarting polling |
 | `integration/visibility-race` | An extension already in flight must finish before the failure reset; explicit gates coordinate child exit and extension completion |
-| `integration/shutdown-listener`, `supervisor-accounting`, `supervisor-signals`, `zero-duration` | Foreperson dispatches shutdown once, enforces accounting/duration limits, dispatches SIGINT/SIGHUP, and removes its handlers |
+| `integration/shutdown-listener`, `supervisor-accounting`, `supervisor-signals` | Foreperson dispatches shutdown once, enforces the accounting limit, and dispatches SIGINT/SIGHUP |
 | `refresher/mapping` | Credentials, expiration, inline policy, policy ARNs and tenant tags |
 | `refresher/write-success` | Caller starts credential retrieval; writing returns void after replacing/appending keys while preserving unrelated content and file metadata |
 | `refresher/write-failure`, `write-error-cleanup` | Original-file preservation and temporary-file cleanup for both Exceptions and Errors |
