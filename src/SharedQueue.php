@@ -46,25 +46,6 @@ class SharedQueue extends EventLoopTask {
             'version' => '2012-11-05',
         ]);
 
-        // I _was_ thinking about doing some kind of 'credentials adapter' here, because refreshing instance profile tokens
-        // *might* block for a few seconds, sometimes? But I think we can just live with it.
-
-        if($visibility_timeout === -1 || $poll_time === -1) {
-            // calculate from queue metadata
-            $queue_metadata = $this->sqs_client->getQueueAttributes([
-                'AttributeNames' => ['All'],
-                'QueueUrl' => $this->queue_name,
-            ]); // synchronous, but deliberately so.
-            // print($queue_metadata."\n");
-            if($visibility_timeout === -1) {
-                $this->visibility_timeout = $queue_metadata['Attributes']['VisibilityTimeout'];
-                print "Discovered visibility timeout of: ".$this->visibility_timeout."\n";
-            }
-            if($poll_time === -1) {
-                $this->poll_time = $queue_metadata['Attributes']['ReceiveMessageWaitTimeSeconds'];
-                print "Discovered maximum poll duration of: ".$this->poll_time."\n";
-            }
-        }
         // TODO - should we boot "Task" separately, as its own 'thing'?
         // it still needs a reference to '$this', somehow, right?
         Task::boot($this->sqs_client, $this->queue_name, $this->max_concurrency,$this);
@@ -181,9 +162,23 @@ class SharedQueue extends EventLoopTask {
 
     function __invoke(): void
     {
-        // FIXME - this is not going to work like this!!!!!!!!
-        //return [$this->iterations,microtime(true) - $this->start_time];
-        EventLoop::queue(fn () => $this->QueueReceiveLoop());
+        if($this->visibility_timeout === -1) {
+            // calculate from queue metadata
+            // this has to fire in some kind of closure since at invoke-time
+            // (when this method is called), the event loop has *not* been
+            // started yet.
+            async(fn () => $this->sqs_client->getQueueAttributes([
+                'AttributeNames' => ['All'],
+                'QueueUrl' => $this->queue_name,
+            ]))->map(function ($queue_metadata) {
+                // print($queue_metadata."\n");
+                $this->visibility_timeout = $queue_metadata['Attributes']['VisibilityTimeout'];
+                print "Discovered visibility timeout of: ".$this->visibility_timeout."\n";
+                EventLoop::queue(fn () => $this->QueueReceiveLoop());
+            });
+        } else {
+            EventLoop::queue(fn() => $this->QueueReceiveLoop());
+        }
     }
 
     public function get_iterations_count(): int

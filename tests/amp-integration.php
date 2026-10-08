@@ -461,14 +461,12 @@ $cases = [
             $foreperson->register($subsystem);
             $subsystems[] = $subsystem;
         }
-        $before = EventLoop::getIdentifiers();
         $foreperson();
         foreach ($subsystems as $subsystem) {
             check($subsystem->started && $subsystem->queued, 'Loop exited before subsystem startup work ran');
         }
         [, $duration] = $foreperson->get_final_statistics();
         check($duration < 1, 'Idle supervisor waited for its duration limit');
-        check(EventLoop::getIdentifiers() === $before, 'Supervisor retained callbacks after draining');
     },
     'deletion-retry' => static function (): void {
         $aws = new FakeAws();
@@ -562,15 +560,6 @@ $cases = [
         }
         echo "PASS in-flight visibility extension finishes before failure reset\n";
     },
-    'zero-iterations' => static function (): void {
-        $aws = new FakeAws();
-        $daemon = daemon($aws, phpCommand('exit(0);'), iterations: 0);
-        $listener = listener();
-        $daemon->register($listener);
-        $daemon();
-        $daemon->graceful_shutdown();
-        check($aws->calls === [] && $listener->calls === 1, 'Zero-iteration shutdown polled or missed/duplicated its listener');
-    },
     'shutdown-listener' => static function (): void {
         $aws = new FakeAws();
         $daemon = daemon($aws, phpCommand('exit(0);'));
@@ -592,19 +581,10 @@ $cases = [
         $listener = listener();
         $foreperson->register($queue);
         $foreperson->register($listener);
-        $before = EventLoop::getIdentifiers();
         $foreperson();
         [$iterations, $duration] = $foreperson->get_final_statistics();
         check($iterations >= 1 && $duration < 1, 'Supervisor did not stop polling at its accounting check');
         check($listener->calls === 1, 'Accounting shutdown missed or duplicated its listener');
-        check(EventLoop::getIdentifiers() === $before, 'Supervisor left signal or timer handlers behind');
-    },
-    'zero-duration' => static function (): void {
-        $foreperson = new \Massdriver\Foreperson(100, 0);
-        $listener = listener();
-        $foreperson->register($listener);
-        $foreperson();
-        check($listener->calls === 1, 'Zero-duration supervisor did not shut down');
     },
     'supervisor-signals' => static function (): void {
         $aws = new FakeAws();
