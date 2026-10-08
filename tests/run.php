@@ -7,7 +7,7 @@ $cases = [];
 foreach (['blocking', 'parallel'] as $name) {
     $cases['filesystem/'.$name] = ['filesystem.php', $name];
 }
-foreach (['transport', 'role-credentials', 'startup-idle', 'deletion-retry', 'malformed-batch', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener', 'supervisor-accounting', 'supervisor-signals'] as $name) {
+foreach (['transport', 'queue-reentrant', 'role-credentials', 'sdk-startup', 'startup-idle', 'deletion-retry', 'malformed-batch', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener', 'supervisor-accounting', 'supervisor-signals'] as $name) {
     $cases['integration/'.$name] = ['amp-integration.php', $name];
 }
 foreach (['mapping', 'write-success', 'write-failure', 'write-error-cleanup', 'load', 'backoff', 'retry-isolation', 'reschedule', 'shutdown-in-flight', 'duplicate-keys', 'concurrent-refresh', 'retry-reset', 'empty'] as $name) {

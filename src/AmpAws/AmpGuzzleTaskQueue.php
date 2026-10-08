@@ -4,13 +4,12 @@ declare(strict_types=1);
 namespace Massdriver\AmpAws;
 
 use Amp\DeferredFuture;
-use GuzzleHttp\Promise\TaskQueueInterface;
+use GuzzleHttp\Promise\TaskQueueInterface as GuzzleTaskQueueInterface;
 use Revolt\EventLoop;
 use function Amp\Future\await;
 
-class AmpGuzzleTaskQueue implements TaskQueueInterface
+class AmpGuzzleTaskQueue implements GuzzleTaskQueueInterface
 {
-    protected bool $running = false;
     protected array $futures = [];
 
     public function isEmpty(): bool
@@ -26,19 +25,23 @@ class AmpGuzzleTaskQueue implements TaskQueueInterface
         $this->futures[] = $deferred->getFuture();
         $my_index = array_key_last($this->futures);
         EventLoop::queue(function () use ($deferred, $task, $my_index): void {
+            unset($this->futures[$my_index]);
             try {
                 $task();
                 $deferred->complete();
             } catch (\Throwable $exception) {
                 $deferred->error($exception);
-            } finally {
-                unset($this->futures[$my_index]);
             }
         }); //'queue' is not 'nextTick' but at the _end_ of this tick? Let's try it
     }
 
     public function run(): void
     {
-        await($this->futures);
+        // SDK constructors can call run() from inside a Guzzle callback. The
+        // running callbacks cannot finish until run() returns; only drain work
+        // still queued, including work added by the callbacks we await.
+        while (count($this->futures) > 0) {
+            await($this->futures); // The futures we await could add *other* futures, and we need to make sure *all* have run
+        }
     }
 }

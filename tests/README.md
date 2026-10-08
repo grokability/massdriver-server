@@ -34,13 +34,15 @@ cleanup after a rendering error. They do not contact AWS.
 | --- | --- |
 | `filesystem/blocking`, `filesystem/parallel` | Filesystem operations honor the selected driver, including metadata, move and failure cleanup |
 | `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP delay, cancellation, timeout and cleanup |
+| `integration/queue-reentrant` | A Guzzle callback can drain the queue without waiting on itself, including work added by nested callbacks |
 | `integration/deletion-retry` | Receive recovery, large stdout/stderr drainage, deletion retries and natural drain |
 | `integration/malformed-batch` | A malformed message does not prevent later messages in the batch from running |
 | `integration/failed-jobs` | Failed job visibility reset, failed cron deletion and early pipe closure |
 | `integration/visibility` | Long-running job visibility extension |
 | `integration/shutdown` | Cancelling an outstanding receive |
 | `integration/startup-idle` | Both async subsystems and their queued startup work run before the supervisor exits naturally when idle |
-| `integration/role-credentials` | Default EC2 role discovery uses the configured async transport, sends the IMDSv2 token, and signs SQS with the resulting role credentials |
+| `integration/sdk-startup` | Real SDK discovery and receive run through SharedQueue and Foreperson without fixture timers keeping the loop alive; HTTP responses use dummy keys and a fake handler |
+| `integration/role-credentials` | The full default credential chain reaches EC2 role discovery through the configured async transport, sends the IMDSv2 token, and signs SQS with the resulting role credentials |
 | `integration/single-worker` | Releasing the last slot before restarting polling |
 | `integration/visibility-race` | An extension already in flight must finish before the failure reset; explicit gates coordinate child exit and extension completion |
 | `integration/shutdown-listener`, `supervisor-accounting`, `supervisor-signals` | Foreperson dispatches shutdown once, enforces the accounting limit, and dispatches SIGINT/SIGHUP |

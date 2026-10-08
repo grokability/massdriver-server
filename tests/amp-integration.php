@@ -382,16 +382,81 @@ function phpCommand(string $code): string
     return escapeshellarg(PHP_BINARY).' -r '.escapeshellarg($code);
 }
 $cases = [
+    'queue-reentrant' => static function (): void {
+        $queue = new AmpGuzzleTaskQueue();
+        Utils::queue($queue);
+        $order = [];
+        $queue->add(static function () use ($queue, &$order): void {
+            $order[] = 'outer-start';
+            $queue->add(static function () use ($queue, &$order): void {
+                $order[] = 'inner';
+                $queue->add(static function () use (&$order): void { $order[] = 'inner-nested'; });
+            });
+            // SDK client construction can synchronously drain Guzzle's queue
+            // from inside a credential-provider callback already on that queue.
+            $queue->run();
+            $order[] = 'outer-end';
+        });
+        EventLoop::run();
+        check($order === ['outer-start', 'inner', 'inner-nested', 'outer-end'],
+            'Reentrant queue run deadlocked or left nested work pending');
+        check($queue->isEmpty(), 'Reentrant queue run retained completed work');
+    },
+    'sdk-startup' => static function (): void {
+        // Exercise the production SDK/queue startup together. Only microtasks
+        // resolve the fake HTTP responses; no fixture timer keeps the loop alive.
+        $requests = [];
+        $foreperson = new \Massdriver\Foreperson(100, 30);
+        $handler = static function ($request) use (&$requests, $foreperson): \GuzzleHttp\Promise\PromiseInterface {
+            $operation = $request->getHeaderLine('X-Amz-Target');
+            $requests[] = $operation;
+            if (str_ends_with($operation, 'GetQueueAttributes')) {
+                $body = '{"Attributes":{"VisibilityTimeout":"30"}}';
+            } else {
+                check(str_ends_with($operation, 'ReceiveMessage'), 'Unexpected startup operation');
+                $body = '{"Messages":[]}';
+                EventLoop::queue(fn () => $foreperson->graceful_shutdown());
+            }
+            return new \GuzzleHttp\Promise\FulfilledPromise(new \GuzzleHttp\Psr7\Response(
+                200, ['Content-Type' => 'application/x-amz-json-1.0'], $body,
+            ));
+        };
+        $client = new AmpAws('Sqs', [
+            'region' => 'us-east-2', 'version' => '2012-11-05',
+            'endpoint' => 'http://127.0.0.1:9',
+            'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
+            'http_handler' => $handler,
+        ]);
+        $queue = new \Massdriver\SharedQueue(
+            queue_name: 'http://127.0.0.1:9/queue', max_concurrency: 4, sqs_client: $client,
+        );
+        check($requests === [], 'Queue constructor started SDK operations');
+        $foreperson->register($queue);
+        $foreperson();
+        check($requests === ['AmazonSQS.GetQueueAttributes', 'AmazonSQS.ReceiveMessage'],
+            'Loop exited before SDK discovery and receive completed');
+        check($queue->visibility_timeout === 30, 'Discovered visibility timeout was not applied');
+        $pending = new ReflectionProperty(\Massdriver\SharedQueue::class, 'sqs_request_pending');
+        check($pending->getValue($queue) === null, 'Loop exited with a pending receive');
+    },
     'role-credentials' => static function (): void {
         $environment = [];
-        foreach (['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI', 'AWS_CONTAINER_CREDENTIALS_FULL_URI', 'AWS_EC2_METADATA_DISABLED'] as $name) {
+        foreach (['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE', 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI', 'AWS_CONTAINER_CREDENTIALS_FULL_URI', 'AWS_EC2_METADATA_DISABLED', 'AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE'] as $name) {
             $environment[$name] = getenv($name);
             putenv($name);
         }
         $paths = [];
         $authorization = '';
         $completed = false;
+        $configFile = tempnam(sys_get_temp_dir(), 'massdriver-aws-config-');
+        $credentialsFile = tempnam(sys_get_temp_dir(), 'massdriver-aws-credentials-');
         try {
+            // Keep the full production provider chain, with isolated empty
+            // profiles so no local AWS account or cached login is used.
+            file_put_contents($configFile, "[default]\n");
+            file_put_contents($credentialsFile, "[default]\n");
+            putenv('AWS_CONFIG_FILE=' . $configFile);
+            putenv('AWS_SHARED_CREDENTIALS_FILE=' . $credentialsFile);
             $handler = static function ($request, array $options) use (&$paths, &$authorization): \GuzzleHttp\Promise\PromiseInterface {
                 $paths[] = $request->getUri()->getPath();
                 $path = $request->getUri()->getPath();
@@ -423,7 +488,6 @@ $cases = [
                 'region' => 'us-east-2', 'version' => '2012-11-05',
                 'endpoint' => 'http://127.0.0.1:9',
                 'ec2_metadata_service_endpoint' => 'http://127.0.0.1:9',
-                'use_aws_shared_config_files' => false,
                 'http_handler' => $handler,
             ]);
             async(static function () use ($client, &$completed): void {
@@ -437,6 +501,8 @@ $cases = [
             check(str_contains($authorization, 'Credential=role-key/'), 'Receive was not signed with role credentials');
             EventLoop::run(); // Credential discovery must not leave an idle keepalive.
         } finally {
+            unlink($configFile);
+            unlink($credentialsFile);
             foreach ($environment as $name => $value) {
                 putenv($value === false ? $name : $name . '=' . $value);
             }
