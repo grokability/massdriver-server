@@ -33,7 +33,7 @@ cleanup after a rendering error. They do not contact AWS.
 | Cases | Behavior |
 | --- | --- |
 | `filesystem/blocking`, `filesystem/parallel` | Filesystem operations honor the selected driver, including metadata, move and failure cleanup |
-| `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP delay, cancellation, timeout and cleanup |
+| `integration/transport` | Guzzle queue ordering, errors and repeated use; promise recovery; AWS signing/retry; HTTP error rejection with preserved AWS exception details and exhausted retries; HTTP delay, cancellation, timeout and cleanup |
 | `integration/queue-reentrant` | A Guzzle callback can drain the queue without waiting on itself, including work added by nested callbacks |
 | `integration/deletion-retry` | Receive recovery, large stdout/stderr drainage, deletion retries and natural drain |
 | `integration/malformed-batch` | A malformed message does not prevent later messages in the batch from running |

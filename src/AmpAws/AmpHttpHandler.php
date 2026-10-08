@@ -112,7 +112,18 @@ class AmpHttpHandler
                 $response = $this->client->request($transfer, $token);
                 $body = $response->getBody()->buffer($token);
                 if ($promise->getState() === GuzzlePromiseInterface::PENDING) {
-                    $promise->resolve(new GuzzleResponse($response->getStatus(), $response->getHeaders(), $body, $response->getProtocolVersion(), $response->getReason()));
+                    $http_response = new GuzzleResponse($response->getStatus(), $response->getHeaders(), $body, $response->getProtocolVersion(), $response->getReason());
+                    if ($http_response->getStatusCode() >= 400) {
+                        // The SDK parses service errors and applies retries from
+                        // rejected responses, rather than successful empty Results.
+                        $promise->reject([
+                            'exception' => GuzzleRequestException::create($request, $http_response),
+                            'response' => $http_response,
+                            'connection_error' => false,
+                        ]);
+                    } else {
+                        $promise->resolve($http_response);
+                    }
                 }
             } catch (\Throwable $error) {
                 if ($promise->getState() === GuzzlePromiseInterface::PENDING) {

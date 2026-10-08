@@ -175,6 +175,9 @@ class SharedQueue extends EventLoopTask {
                 $this->visibility_timeout = $queue_metadata['Attributes']['VisibilityTimeout'];
                 print "Discovered visibility timeout of: ".$this->visibility_timeout."\n";
                 EventLoop::queue(fn () => $this->QueueReceiveLoop());
+            })->catch(function (\Throwable $error) {
+                print "Error when trying to discover queue metadata! ".$error->getMessage()."\n";
+                throw new \RuntimeException("Error introspecting into queue: ".$this->queue_name);
             });
         } else {
             EventLoop::queue(fn() => $this->QueueReceiveLoop());

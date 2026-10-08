@@ -81,12 +81,13 @@ $cancelOnArrival = null;
 $sdkArrived = new DeferredFuture();
 $sdkClosed = new DeferredFuture();
 $sdkRetryAttempts = 0;
+$errorAttempts = [403 => 0, 500 => 0];
 $socket = listen('127.0.0.1:0');
 $connections = new SplObjectStorage();
-async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts): void {
+async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts, &$errorAttempts): void {
     while ($connection = $socket->accept()) {
         $connections->attach($connection);
-        async(function () use ($connection, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts): void {
+        async(function () use ($connection, $connections, &$requests, &$attempts, &$slowArrived, &$cancelOnArrival, &$sdkArrived, &$sdkClosed, &$sdkRetryAttempts, &$errorAttempts): void {
             try {
                 $data = '';
                 while (!str_contains($data, "\r\n\r\n")) {
@@ -133,7 +134,14 @@ async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArri
                 }
                 $status = 200;
                 $body = '{}';
-                if (stripos($head, 'X-Amz-Target:') !== false) {
+                if (str_starts_with($requestPath, '/http-error/')) {
+                    $status = (int) substr($requestPath, strlen('/http-error/'));
+                    $errorAttempts[$status]++;
+                    $body = json_encode([
+                        '__type' => $status === 403 ? 'AccessDeniedException' : 'InternalError',
+                        'message' => 'simulated HTTP failure',
+                    ]);
+                } elseif (stripos($head, 'X-Amz-Target:') !== false) {
                     if (++$attempts === 1) {
                         $status = 500;
                         $body = '{"__type":"InternalError","message":"try again"}';
@@ -141,7 +149,7 @@ async(function () use ($socket, $connections, &$requests, &$attempts, &$slowArri
                         $body = '{"Messages":[]}';
                     }
                 }
-                $connection->write("HTTP/1.1 $status Response\r\nContent-Type: application/x-amz-json-1.0\r\nConnection: close\r\nContent-Length: ".strlen($body)."\r\n\r\n".$body);
+                $connection->write("HTTP/1.1 $status Response\r\nContent-Type: application/x-amz-json-1.0\r\nx-amzn-RequestId: test-request-id\r\nConnection: close\r\nContent-Length: ".strlen($body)."\r\n\r\n".$body);
             } finally {
                 $connection->close();
                 $connections->detach($connection);
@@ -182,6 +190,38 @@ try {
         'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
     ]);
     check($wrapper->receiveMessage(['QueueUrl' => $url.'/queue'])['Messages'] === [], 'Amp AWS wrapper failed');
+
+    $outcome = runRequest($handler(new Request('GET', $url.'/http-error/403')));
+    $reason = $outcome['reason'] ?? [];
+    check(($reason['exception'] ?? null) instanceof \GuzzleHttp\Exception\RequestException,
+        'HTTP error fulfilled instead of rejecting with a request exception');
+    check($reason['connection_error'] === false && $reason['response']->getStatusCode() === 403,
+        'HTTP error lost its response or became a connection error');
+    check(str_contains((string) $reason['response']->getBody(), 'AccessDeniedException'),
+        'HTTP error body was lost');
+
+    foreach ([403 => 'AccessDeniedException', 500 => 'InternalError'] as $status => $code) {
+        $errorClient = new AmpAws('Sqs', [
+            'region' => 'us-east-2', 'version' => '2012-11-05',
+            'endpoint' => $url.'/http-error/'.$status,
+            'credentials' => ['key' => 'test-key', 'secret' => 'test-secret'],
+            'retries' => 2,
+        ]);
+        $before = $errorAttempts[$status];
+        $pending = async(fn () => $errorClient->receiveMessage(['QueueUrl' => $url.'/queue']));
+        try {
+            $pending->await(new TimeoutCancellation(5));
+            throw new RuntimeException('HTTP error was reported as a successful receive');
+        } catch (\Aws\Sqs\Exception\SqsException $error) {
+            check($error->getStatusCode() === $status && $error->getAwsErrorCode() === $code,
+                'SDK error lost its HTTP status or AWS error code');
+            check($error->getAwsErrorMessage() === 'simulated HTTP failure', 'SDK error lost its message');
+            check($error->getAwsRequestId() === 'test-request-id', 'SDK error lost its request ID');
+        }
+        check($errorAttempts[$status] - $before === ($status === 500 ? 3 : 1),
+            'SDK did not retry server errors or retried a permissions error');
+    }
+    echo "PASS HTTP error rejection, AWS exception details, and exhausted retries through Amp Futures\n";
 
     $before = count($requests);
     $cancellation = new \Amp\DeferredCancellation();
