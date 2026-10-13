@@ -219,7 +219,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
     {
         $params = [
             'DurationSeconds' => $this->credential_duration,
-            'Name' => $tenant,
+            'Name' => md5($tenant),
             // Policy will get subbed in here for $this->inline_policy (if set)
             // PolicyArns will get subbed in here for $this->$this->arns (also only if set)
             'Tags' => [
