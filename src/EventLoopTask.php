@@ -56,5 +56,9 @@ abstract class EventLoopTask
         //do nothing by default
     }
 
+    public function hard_reload() {
+        // also do nothing by default
+    }
+
     abstract public function get_iterations_count(): int;
 }

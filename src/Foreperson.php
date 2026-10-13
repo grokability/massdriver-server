@@ -71,6 +71,13 @@ class Foreperson extends EventLoopTask
         });
         EventLoop::unreference($reload_handler);
 
+        $hard_reload_handler = EventLoop::onSignal(SIGUSR1, function () {
+            foreach($this->registrations as $registration) {
+                $registration->hard_reload();
+            }
+        });
+        EventLoop::unreference($hard_reload_handler);
+
         $this->start_time = microtime(true);
         foreach ($this->registrations as $registration) {
             async(fn () => $registration());
@@ -98,7 +105,7 @@ class Foreperson extends EventLoopTask
 
     public function register(EventLoopTask $system): void
     {
-        $this->registrations[] = $system;
+        $this->registrations[get_class($system)] = $system;
     }
 
     public function graceful_shutdown():void

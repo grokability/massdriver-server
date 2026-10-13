@@ -80,10 +80,12 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
     protected array $retry_counts = [];
     protected AmpAws $sts_client;
     protected int $number_of_tenants = 0;
+    protected string $directory_prefix;
+    protected string $directory_suffix;
 
     public function __construct(
         /** @noinspection SpellCheckingInspection */
-        public string $directory,
+        string $directory,
         public string $inline_role = '',
         public array $arns = [],
         public int $credential_duration = 129_600,
@@ -97,6 +99,10 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                 'version' => '2011-06-15',
             ]
         );
+        if(!str_contains($directory,'{TENANT}')){
+            throw new \Exception("Directory '$directory' does not have {TENANT}");
+        }
+        list($this->directory_prefix, $this->directory_suffix) = explode('{TENANT}',$directory);
     }
 
     public function __invoke(): void
@@ -121,12 +127,20 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         });
     }
 
-    public function env_path_for_tenant($tenant): string
+    public function hard_reload(): void
     {
-        return rtrim($this->directory, '/') . "/$tenant/.env";
+        print "Forcibly re-freshing *all* client credentials\n";
+        $this->load_credentials_from_disk(true)->catch(static function (\Throwable $error): void {
+            print "Unable to load tenant credentials: {$error->getMessage()}\n";
+        });
     }
 
-    public function load_credentials_from_disk(): Future
+    public function env_path_for_tenant($tenant): string
+    {
+        return rtrim(rtrim($this->directory_prefix, '/') . "/$tenant/".$this->directory_suffix,'/')."/.env";
+    }
+
+    public function load_credentials_from_disk(bool $force_reload = false): Future
     {
         if ($this->stopping) {
             return Future::complete();
@@ -134,38 +148,37 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         if ($this->reload !== null && !$this->reload->isComplete()) {
             return $this->reload;
         }
-        return $this->reload = async(function (): void {
+        $this->reload = async(function () use($force_reload): void {
             $futures = [];
-            foreach (listFiles($this->directory) as $tenant) {
-                if (!isDirectory(rtrim($this->directory, '/') . '/' . $tenant)) {
+            foreach (listFiles($this->directory_prefix) as $tenant) {
+                $dirname = rtrim($this->directory_prefix, '/') . "/$tenant";
+                if (!isDirectory($dirname)) {
+                    print "Warning: $dirname is not a directory\n";
                     continue;
                 }
-                $futures[$tenant] = async(function () use ($tenant): void {
+                $futures[$tenant] = async(function () use ($tenant,$force_reload): float {
                     // A reload must not overwrite state halfway through a renewal.
                     if (isset($this->refreshing[$tenant])) {
                         $this->refreshing[$tenant]->await();
                     }
                     if ($this->stopping) {
-                        return;
+                        return -1;
                     }
-                    $contents = readFileContents($this->env_path_for_tenant($tenant));
-                    $this->credentials_array[$tenant] = array_intersect_key(Dotenv::parse($contents), self::CREDENTIAL_MAP);
-                    $this->single_credential_refresh_loop($tenant);
+                    $start = microtime(true);
+                    $this->single_credential_refresh_loop($tenant,$force_reload);
+                    return $start;
+                })->catch(function (\Throwable $error) use ($tenant): void {
+                    print "Tenant $tenant credential refresh *failed* - ".$error->getMessage()."\n";
+                    throw $error;
                 });
             }
-            $this->number_of_tenants=count($futures);
-
-            // Settle every tenant before reporting failures, so reloads cannot overlap.
-            [$errors, $_values] = awaitAll($futures);
-            if ($errors) {
-                $failed_tenants = array_keys($errors);
-                $first_failed_tenant = array_key_first($failed_tenants);
-                throw new \RuntimeException("Failed to load tenants: ".implode(",",$failed_tenants) .". First Failed Tenant: $first_failed_tenant - ". $errors[$first_failed_tenant]->getMessage(), 0, $errors[$first_failed_tenant]);
-            }
+            $this->number_of_tenants = count($futures);
+            print "Number of tenants has been initialized to: ".$this->number_of_tenants."\n";
         });
+        return $this->reload;
     }
 
-    public function single_credential_refresh_loop(string $tenant): void
+    public function single_credential_refresh_loop(string $tenant,bool $force_reload=false): void
     {
         if ($this->stopping) {
             return;
@@ -178,11 +191,12 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
             EventLoop::cancel($this->refresh_credentials_timers[$tenant]);
             unset($this->refresh_credentials_timers[$tenant]);
         }
-        // I hate this, but I don't know exactly how else to do it? I hate the multiple-assignments, same-line thing
-        $refresh = $this->refreshing[$tenant] = async(function () use ($tenant): void {
-            $credentials = $this->credentials_array[$tenant];
+
+        $this->refreshing[$tenant] = async(function () use ($tenant,$force_reload): void {
+            $start = microtime(true);
+            $credentials = $this->credentials_array[$tenant] ?? [];
             $delay = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true) - $this->refresh_threshold;
-            if ($delay <= 0) {
+            if ($delay <= 0 || $force_reload) {
                 try {
                     $credential_future = async(fn () => $this->refresh_one_credential($tenant));
                     $contents = async(fn () => readFileContents($this->env_path_for_tenant($tenant)));
@@ -192,27 +206,30 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                     unset($this->retry_counts[$tenant]);
                     $delay = $credentials['_SESSION_EXPIRATION'] - microtime(true) - $this->refresh_threshold;
                 } catch (\Throwable $error) {
+                    // TODO: I don't get why the math is so weird here. What's up with that?
                     $delays = [5, 10, 30, 45, 60];
                     $attempt = $this->retry_counts[$tenant] ?? 0;
                     $delay = $delays[min($attempt, count($delays) - 1)];
                     $this->retry_counts[$tenant] = min($attempt + 1, count($delays) - 1);
-                    print "Exception caught when renewing credentials: $tenant: {$error->getMessage()}\n";
+                    print "Exception caught when renewing credentials: $tenant: {$error->getMessage()}. Retrying in $delay seconds.\n";
+                    // this *executes* on its delay by falling off the end here, and getting handled by the
+                    // EventLoop::delay() stuff, below
                 }
+                print "Actual re-fetch of credentials for $tenant in IAM took ".(microtime(true)-$start)." seconds, next scheduled for $delay seconds\n";
+            } else {
+                print "Credentials not due for refresh for $tenant yet, still need $delay seconds\n";
             }
-            if (!$this->stopping) {
-                $timer = EventLoop::delay(max(0.1, $delay), function () use ($tenant): void {
-                    unset($this->refresh_credentials_timers[$tenant]);
-                    $this->single_credential_refresh_loop($tenant);
-                });
-                EventLoop::unreference($timer);
-                $this->refresh_credentials_timers[$tenant] = $timer;
+            if($this->stopping) {
+                // Do not try and schedule a new refresh if we're stopping
+                return;
             }
-        });
-        try {
-            $refresh->await();
-        } finally {
-            unset($this->refreshing[$tenant]);
-        }
+            $timer = EventLoop::delay(max(0.1, $delay), function () use ($tenant): void {
+                unset($this->refresh_credentials_timers[$tenant]);
+                $this->single_credential_refresh_loop($tenant);
+            });
+            EventLoop::unreference($timer); //credential refreshes are not enough to hold the event-loop open
+            $this->refresh_credentials_timers[$tenant] = $timer;
+        })->finally(function () use ($tenant) { unset($this->refreshing[$tenant]);});
     }
 
     public function refresh_one_credential(string $tenant): array
@@ -300,6 +317,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
     {
         // We figure an "iteration" is a full cycle of refreshes, one for every tenant
         // hence the math below
-        return $this->number_of_tenants === 0 ? 0 : (int)floor($this->refreshes / $this->number_of_tenants);
+        // print "DEBUG: raw iterations are: ".$this->refreshes." vs tenant count of ".$this->number_of_tenants."\n";
+        return $this->number_of_tenants === 0 ? -1 : (int)floor($this->refreshes / $this->number_of_tenants);
     }
 }

@@ -86,7 +86,7 @@ class SharedQueue extends EventLoopTask {
             'MessageAttributeNames' => ['All'],
         ];
         $this->iterations++;
-        print("Asking SQS for: ".$params['MaxNumberOfMessages']." messages.\n");
+        print("Asking SQS for: ".$params['MaxNumberOfMessages']." messages. (On iteration # ".$this->iterations.")\n");
 
         $this->receive_cancellation = new DeferredCancellation();
         $this->sqs_request_pending = async(function () use ($params): void {
@@ -155,7 +155,7 @@ class SharedQueue extends EventLoopTask {
             } finally {
                 $this->sqs_request_pending = null;
                 $this->receive_cancellation = null;
-                EventLoop::queue(fn () => $this->QueueReceiveLoop()); // FIXME - this doesn't seem right; isn't this *way* too soon?
+                EventLoop::queue(fn () => $this->QueueReceiveLoop()); // after the event loop has *synchronously* completed, queue it right up again
             }
         });
     }
