@@ -2,6 +2,7 @@
 
 namespace Massdriver;
 
+use Amp\File\Driver\StatusCachingFilesystemDriver;
 use Amp\File\Filesystem;
 use Revolt\EventLoop;
 use function Amp\async;
@@ -50,6 +51,21 @@ class Foreperson extends EventLoopTask
         public ?Filesystem $filesystem_driver = null,
     ) {
         print("Selected event loop: ".get_class(EventLoop::getDriver())."\n");
+        try {
+            $filesystem = filesystem();
+            $driver = (new \ReflectionProperty($filesystem, 'driver'))
+                ->getValue($filesystem);
+
+            // Automatic selection wraps the actual driver in a status cache.
+            if ($driver instanceof StatusCachingFilesystemDriver) {
+                $driver = (new \ReflectionProperty($driver, 'driver'))
+                    ->getValue($driver);
+            }
+
+            print("Selected filesystem driver: ".get_class($driver)."\n");
+        } catch (\Throwable $e) {
+            print "Unable to determine filesystem driver: ".$e->getMessage()."\n";
+        }
     }
 
     public function __invoke():void

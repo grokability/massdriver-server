@@ -40,6 +40,8 @@ if(!empty($argv[1])) {
     }
     if($argv[1] == "--help") {
         print("You can run this in --dev mode, where it won't set queue entries visibility to zero on failure\n");
+        print("Sending a SIGHUP to this process forces it to re-read the `DIRECTORY_OF_ENV_VARS` for newly-added directories\n");
+        print("Sending a SIGUSR1 to this process forces it to re-generate *all* credentials, even if they're not expired\n");
         print("Allowed environment variables are: \n\n");
         print("(Supervisor environment variables:)\n\n");
         foreach(Foreperson::get_env_var_names() as $foreperson_var) {

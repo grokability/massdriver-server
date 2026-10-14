@@ -97,4 +97,6 @@ quotes inside of your inline role, which is unpleasant to look at, and hard to d
 apostrophes instead (`'`). You still *will* have to backslash any dollar signs, however.
 
 You can adjust credential duration and what the appropriate refresh threshold should be. Sending a `SIGHUP` to massdriver
-will tell it to re-read the directory of `DIRECTORY_OF_ENV_VARS`.
+will tell it to re-read the directory of `DIRECTORY_OF_ENV_VARS`. Sending a `SIGUSR1` will *force* all the credentials to
+be refreshed, even if they haven't expired. This can be useful when testing the embedded IAM Policy and/or the Policy 
+ARNs.
