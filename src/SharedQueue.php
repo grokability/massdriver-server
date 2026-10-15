@@ -96,7 +96,10 @@ class SharedQueue extends EventLoopTask {
 
                 foreach( $results->get('Messages') ?? [] as $message) {
                     try {
+                        print_r($message);
+
                         $cron_mode = false;
+                        $job = null;
                         if(($message['MessageAttributes']['subsystem']['StringValue'] ?? '') == 'cron') {
                             print "CRON MODE DETECTED!";
                             $cron_mode = true;
@@ -105,41 +108,30 @@ class SharedQueue extends EventLoopTask {
                             if(!$this->cron_template) {
                                 throw new \RuntimeException("Cron template is not set, but cron mode was detected");
                             }
-                        }
-                        $payload = json_decode($message['Body'], true, 8, JSON_THROW_ON_ERROR);
-                        print_r($message);
-                        $job = '';
-                        $cmd = '';
-                        if($cron_mode) {
-                            // TODO - maybe just have the payload _be_ the command-line message?
-                            // not sure yet until I see if we have to add more parameters to this or something
-                            $cmd = $payload['cmd'] ?? throw new \RuntimeException("Couldn't find 'cmd' in cron-mode message");
+                            $template = $this->cron_template;
                         } else {
                             // The actual job object is base64+serialize()'d in 'command'
+                            $payload = json_decode($message['Body'], true, 8, JSON_THROW_ON_ERROR);
                             $job = $payload['data']['command'] ?? throw new \RuntimeException("Couldn't find command, weird JSON");
+
+                            $template = $this->command_template;
+                            if(!$this->command_template) {
+                                throw new \RuntimeException("No command template found in 'job' mode.");
+                            }
                         }
-                        print("Command is: ".($job ?: $cmd)."\n");
-    
+
                         $replacements = [
                             '{TENANT}' => $message['Attributes']['MessageGroupId'],
-                            '{B64PAYLOAD}' => base64_encode($job),
-                            '{COMMANDLINE}' => $cmd,
+                            '{B64PAYLOAD}' => $job ? base64_encode($job) : '',
+                            '{COMMANDLINE}' => $cron_mode ? $message['Body'] : '',
                         ];
-    
-                        if($cron_mode) {
-                            $command_to_run = str_replace(array_keys($replacements), array_values($replacements), $this->cron_template);
-                        } else {
-                            try {
-                                // Some PHP Serialization formats have NUL bytes in them, and escapeshellarg completely freaks out about those
-                                $job_escaped = escapeshellarg($job);
-                                $replacements['{PAYLOAD}'] = $job_escaped;
-                            } catch (\Throwable $e) {
-                                if (str_contains($this->command_template, '{PAYLOAD}')) {
-                                    throw new \RuntimeException("Could not shell-escape job payload, and {PAYLOAD} was requested in the command template");
-                                }
-                            }
-                            $command_to_run = str_replace(array_keys($replacements), array_values($replacements), $this->command_template);
+                        if ($job && str_contains($this->command_template, '{PAYLOAD}')) {
+                            // we are in job mode, and our template includes '{PAYLOAD}'
+                            // Some PHP Serialization formats have NUL bytes in them, and escapeshellarg completely freaks out about those
+                            $job_escaped = escapeshellarg($job);
+                            $replacements['{PAYLOAD}'] = $job_escaped;
                         }
+                        $command_to_run = str_replace(array_keys($replacements), array_values($replacements), $template);
                         print "COMMAND TO RUN IS:\n$command_to_run\n";
                         // note - '$cron_mode' dictates whether we delete on a failed execution
                         $task = new Task($command_to_run,$message['ReceiptHandle'],$this->visibility_timeout,$cron_mode);
