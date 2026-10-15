@@ -74,7 +74,7 @@ class SharedQueue extends EventLoopTask {
             return;
         }
         if($this->sqs_request_pending) {
-            print "Error! an SQS request was already pending - bailing out.\n";
+            print "An SQS request is already pending, so we're not starting a new one.\n";
             return;
         }
         $params = [
@@ -139,8 +139,8 @@ class SharedQueue extends EventLoopTask {
                                 }
                             }
                             $command_to_run = str_replace(array_keys($replacements), array_values($replacements), $this->command_template);
-                            print "COMMAND TO RUN IS:\n$command_to_run\n";
                         }
+                        print "COMMAND TO RUN IS:\n$command_to_run\n";
                         // note - '$cron_mode' dictates whether we delete on a failed execution
                         $task = new Task($command_to_run,$message['ReceiptHandle'],$this->visibility_timeout,$cron_mode);
                     } catch (\Throwable $error) {
