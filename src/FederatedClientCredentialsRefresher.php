@@ -217,7 +217,23 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                 }
                 print "Actual re-fetch of credentials for $tenant in IAM took ".(microtime(true)-$start)." seconds, next scheduled for $delay seconds\n";
             } else {
-                print "Credentials not due for refresh for $tenant yet, still need $delay seconds\n";
+                //confirm that the credentials are actually on the disk - in some cases, they're in memory, but not on the disk!
+                $credentials_on_disk = true;
+                $credentials_contents = readFileContents($this->env_path_for_tenant($tenant));
+                foreach(array_keys(static::CREDENTIAL_MAP) as $env_var_name) {
+                    if(!strstr($credentials_contents, $env_var_name)) {
+                        $credentials_on_disk = false;
+                        break;
+                    }
+                }
+                if(!$credentials_on_disk) {
+                    print "Credentials for $tenant are not present in .env file, rewriting them. Refreshes in: $delay seconds.\n";
+                    // it's a little weird that we have the tenants credentials in *memory*, but we have to
+                    // wrap it in an async() - but that's the signature of that function; it wants a Future
+                    $this->write_one_credential($tenant, async(fn () => $this->credentials_array[$tenant]), async(fn () => readFileContents($this->env_path_for_tenant($tenant))));
+                } else {
+                    print "Credentials not due for refresh for $tenant yet, still need $delay seconds\n";
+                }
             }
             if($this->stopping) {
                 // Do not try and schedule a new refresh if we're stopping
@@ -227,7 +243,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                 unset($this->refresh_credentials_timers[$tenant]);
                 $this->single_credential_refresh_loop($tenant);
             });
-            EventLoop::unreference($timer); //credential refreshes are not enough to hold the event-loop open
+            EventLoop::unreference($timer); //credential refreshes should not be enough to hold the event-loop open
             $this->refresh_credentials_timers[$tenant] = $timer;
         })->finally(function () use ($tenant) { unset($this->refreshing[$tenant]);});
     }
