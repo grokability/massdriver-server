@@ -36,7 +36,8 @@ chmod($path, 0600);
 $before = stat($path);
 $reflection = new ReflectionClass(FederatedClientCredentialsRefresher::class);
 $refresher = $reflection->newInstanceWithoutConstructor();
-$refresher->directory = $directory;
+$reflection->getProperty('directory_prefix')->setValue($refresher, $directory);
+$reflection->getProperty('directory_suffix')->setValue($refresher, '');
 
 try {
     check(\Massdriver\readFileContents($path) === $original, 'Buffered read failed');

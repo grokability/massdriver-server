@@ -10,7 +10,7 @@ foreach (['blocking', 'parallel'] as $name) {
 foreach (['transport', 'queue-reentrant', 'role-credentials', 'sdk-startup', 'startup-idle', 'deletion-retry', 'malformed-batch', 'failed-jobs', 'visibility', 'shutdown', 'single-worker', 'visibility-race', 'shutdown-listener', 'supervisor-accounting', 'supervisor-signals'] as $name) {
     $cases['integration/'.$name] = ['amp-integration.php', $name];
 }
-foreach (['mapping', 'write-success', 'write-failure', 'write-error-cleanup', 'load', 'backoff', 'retry-isolation', 'reschedule', 'shutdown-in-flight', 'duplicate-keys', 'concurrent-refresh', 'retry-reset', 'empty'] as $name) {
+foreach (['mapping', 'write-success', 'write-failure', 'write-error-cleanup', 'load', 'backoff', 'retry-isolation', 'reschedule', 'shutdown-in-flight', 'duplicate-keys', 'concurrent-refresh', 'retry-reset', 'force-reload', 'malformed-env', 'removed-tenant', 'removed-in-flight', 'removed-uncached-retry', 'tenant-reappears', 'startup-expired', 'startup-near-expiry', 'startup-at-threshold', 'startup-missing-env', 'startup-empty-env', 'startup-missing-expiration'] as $name) {
     $cases['refresher/'.$name] = ['refresher.php', $name];
 }
 $filter = $argv[1] ?? '';

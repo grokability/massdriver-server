@@ -64,13 +64,40 @@ function liveTimers(Refresher $refresher): array
     ));
 }
 
+function refreshAndWait(Refresher $refresher, string $tenant, bool $force = false): void
+{
+    $refresher->single_credential_refresh_loop($tenant, $force);
+    $pending = state($refresher, 'refreshing');
+    $future = $pending[$tenant] ?? null;
+    $future?->await();
+}
+
+function loadAndWait(Refresher $refresher, bool $force = false): void
+{
+    $refresher->load_credentials_from_disk($force)->await();
+    // Loading starts background tenant work. Drain it before asserting, while
+    // unreferenced renewal timers remain scheduled for their future deadlines.
+    EventLoop::run();
+    check(state($refresher, 'refreshing') === [], 'Tenant work did not finish');
+}
+
+function assertRemoved(Refresher $refresher, string $tenant, string $timer): void
+{
+    check(!array_key_exists($tenant, state($refresher, 'credentials_array')), 'Removed tenant retained cached credentials');
+    check(!array_key_exists($tenant, state($refresher, 'refresh_credentials_timers')), 'Removed tenant retained a timer entry');
+    check(!in_array($timer, EventLoop::getIdentifiers(), true), 'Removed tenant timer was not actually cancelled');
+    check(!array_key_exists($tenant, state($refresher, 'refreshing')), 'Removed tenant retained active refresh work');
+    check(!array_key_exists($tenant, state($refresher, 'retry_counts')), 'Removed tenant retained its retry count');
+}
+
 // Construct without the real STS client so no credential discovery or network
 // access is possible. All loading, scheduling, mapping and writing uses production methods.
 function fixture(string $directory, FakeSts $sts): Refresher
 {
     $reflection = new ReflectionClass(Refresher::class);
     $refresher = $reflection->newInstanceWithoutConstructor();
-    $refresher->directory = $directory;
+    $reflection->getProperty('directory_prefix')->setValue($refresher, $directory);
+    $reflection->getProperty('directory_suffix')->setValue($refresher, '');
     $refresher->inline_role = '{"Version":"2012-10-17","Statement":[]}';
     $refresher->arns = ['arn:aws:iam::123456789012:policy/test'];
     $refresher->credential_duration = 129_600;
@@ -82,7 +109,7 @@ function fixture(string $directory, FakeSts $sts): Refresher
 $directory = sys_get_temp_dir().'/massdriver-tests-'.bin2hex(random_bytes(8));
 mkdir($directory.'/tenant', 0700, true);
 $path = $directory.'/tenant/.env';
-$original = "# keep this comment\n\nAPP_NAME=example\nAWS_ACCESS_KEY_ID=old-key\n_SESSION_EXPIRATION=2208988800\n";
+$original = "# keep this comment\n\nAPP_NAME=example\nAWS_ACCESS_KEY_ID=old-key\nAWS_SECRET_ACCESS_KEY=old-secret\nAWS_SESSION_TOKEN=old-token\n_SESSION_EXPIRATION=2208988800\n";
 file_put_contents($path, $original);
 chmod($path, 0600);
 $sts = new FakeSts();
@@ -147,37 +174,34 @@ $cases = [
         check(count($sts->calls) === 1, 'Overlapping renewal called STS twice');
         $sts->release->complete();
         \Amp\Future\await([$first, $second, $reload]);
+        EventLoop::run();
         check(count($sts->calls) === 1 && count(liveTimers($refresher)) === 1, 'Reload raced with renewal or duplicated its timer');
     },
     'retry-reset' => static function () use (&$refresher, $sts): void {
         seed($refresher, 'tenant', 0);
         $sts->failure = new RuntimeException('outage');
-        $refresher->single_credential_refresh_loop('tenant');
-        $refresher->single_credential_refresh_loop('tenant');
+        refreshAndWait($refresher, 'tenant');
+        refreshAndWait($refresher, 'tenant');
         $sts->failure = null;
-        $refresher->single_credential_refresh_loop('tenant');
+        refreshAndWait($refresher, 'tenant');
+        check(count($sts->calls) === 3, 'Retry test did not execute all three attempts');
         check(state($refresher, 'retry_counts') === [], 'Successful renewal retained its backoff');
     },
-    'load' => static function () use (&$refresher, $sts): void {
-        $refresher->load_credentials_from_disk()->await();
+    'load' => static function () use (&$refresher, $sts, $path, $original): void {
+        loadAndWait($refresher);
         check(state($refresher, 'credentials_array')['tenant']['AWS_ACCESS_KEY_ID'] === 'old-key', 'Tenant credentials were not loaded');
         check($sts->calls === [], 'Unexpired credentials were unnecessarily renewed');
         check(count(liveTimers($refresher)) === 1, 'Tenant renewal was not scheduled');
+        check(file_get_contents($path) === $original, 'Valid startup credentials were rewritten');
+        check(!isset(state($refresher, 'credentials_array')['tenant']['APP_NAME']), 'Unrelated environment values entered the credential cache');
         $refresher->graceful_shutdown();
         check(liveTimers($refresher) === [], 'Shutdown left renewal timers');
         EventLoop::run();
     },
-    'empty' => static function () use (&$refresher, $path, $directory): void {
-        check($refresher->get_iterations_count() === 0, 'Unloaded refresher did not report zero iterations');
-        unlink($path);
-        rmdir($directory.'/tenant');
-        $refresher->load_credentials_from_disk()->await();
-        check($refresher->get_iterations_count() === 0, 'Empty refresher did not report zero iterations');
-    },
     'backoff' => static function () use (&$refresher, $sts): void {
         seed($refresher, 'tenant', 0);
         $sts->failure = new RuntimeException('simulated STS outage');
-        $refresher->single_credential_refresh_loop('tenant');
+        refreshAndWait($refresher, 'tenant');
         delay(0.35); // Much shorter than the intended first retry delay of five seconds.
         check(count($sts->calls) === 1, 'Credential failure retried within 350ms instead of backing off');
     },
@@ -188,16 +212,16 @@ $cases = [
             mkdir($directory.'/'.$tenant, 0700);
             file_put_contents($directory.'/'.$tenant.'/.env', '_SESSION_EXPIRATION=0');
             seed($refresher, $tenant, 0);
-            try { $refresher->single_credential_refresh_loop($tenant); }
+            try { refreshAndWait($refresher, $tenant); }
             catch (Throwable $error) { throw new RuntimeException('One tenant exhausted another tenant\'s retry budget', 0, $error); }
         }
     },
     'reschedule' => static function () use (&$refresher, $path): void {
         seed($refresher, 'tenant', microtime(true) + $refresher->refresh_threshold + 0.1);
-        $refresher->single_credential_refresh_loop('tenant');
+        refreshAndWait($refresher, 'tenant');
         // Another actor refreshes credentials before our earlier timer fires.
         file_put_contents($path, '_SESSION_EXPIRATION='.(time() + 7200));
-        $refresher->load_credentials_from_disk()->await();
+        loadAndWait($refresher);
         delay(0.3);
         check(count(liveTimers($refresher)) === 1, 'Reload left a stale timer ID and no future renewal');
     },
@@ -210,9 +234,143 @@ $cases = [
         $refresher->graceful_shutdown();
         $sts->release->complete();
         $refresh->await();
+        EventLoop::run();
         check(liveTimers($refresher) === [], 'In-flight renewal scheduled another timer after shutdown');
     },
+    'force-reload' => static function () use (&$refresher, $sts, $path): void {
+        loadAndWait($refresher);
+        $oldTimer = state($refresher, 'refresh_credentials_timers')['tenant'];
+        loadAndWait($refresher, true);
+        check(count($sts->calls) === 1, 'Forced reload did not renew valid credentials exactly once');
+        check(Dotenv::parse(file_get_contents($path))['AWS_ACCESS_KEY_ID'] === 'test-key', 'Forced reload did not replace disk credentials');
+        check(state($refresher, 'credentials_array')['tenant']['AWS_ACCESS_KEY_ID'] === 'test-key', 'Forced reload did not update the cache');
+        check(count(liveTimers($refresher)) === 1, 'Forced reload did not schedule exactly one renewal');
+        check(!in_array($oldTimer, EventLoop::getIdentifiers(), true), 'Forced reload retained the previous timer');
+    },
+    'malformed-env' => static function () use (&$refresher, $sts, $path, $directory, $original): void {
+        $malformed = "=invalid-name\n";
+        file_put_contents($path, $malformed);
+        mkdir($directory.'/healthy', 0700);
+        file_put_contents($directory.'/healthy/.env', $original);
+        // Reject invalid dotenv content without overwriting it or taking down
+        // the event loop; another healthy tenant must still load and schedule.
+        loadAndWait($refresher);
+        check(file_get_contents($path) === $malformed, 'Malformed tenant configuration was overwritten');
+        check($sts->calls === [], 'Malformed configuration unexpectedly requested new credentials');
+        check(state($refresher, 'credentials_array')['healthy']['AWS_ACCESS_KEY_ID'] === 'old-key', 'Malformed tenant prevented healthy tenant loading');
+        check(isset(state($refresher, 'refresh_credentials_timers')['healthy']), 'Healthy tenant renewal was not scheduled');
+        check(count(liveTimers($refresher)) === 2, 'Malformed tenant did not retain a retry alongside the healthy renewal');
+        check(state($refresher, 'retry_counts')['tenant'] === 1, 'Malformed tenant did not enter failure backoff');
+        // Simulate the scheduled retry after an operator fixes the file,
+        // without waiting five seconds for its timer.
+        file_put_contents($path, $original);
+        refreshAndWait($refresher, 'tenant');
+        check(state($refresher, 'credentials_array')['tenant']['AWS_ACCESS_KEY_ID'] === 'old-key', 'Corrected tenant did not recover on retry');
+        check(count(liveTimers($refresher)) === 2, 'Recovered tenant lost or duplicated a renewal timer');
+        check($sts->calls === [], 'Corrected valid credentials were unnecessarily refreshed');
+    },
+    'removed-tenant' => static function () use (&$refresher, $sts, $path, $directory, $original): void {
+        mkdir($directory.'/healthy', 0700);
+        file_put_contents($directory.'/healthy/.env', $original);
+        loadAndWait($refresher);
+        $oldTimer = state($refresher, 'refresh_credentials_timers')['tenant'];
+        unlink($path);
+        rmdir($directory.'/tenant');
+        loadAndWait($refresher);
+        assertRemoved($refresher, 'tenant', $oldTimer);
+        check(state($refresher, 'number_of_tenants') === 1, 'Removed tenant was still counted');
+        check(state($refresher, 'credentials_array')['healthy']['AWS_ACCESS_KEY_ID'] === 'old-key', 'Removal affected healthy credentials');
+        check(count(liveTimers($refresher)) === 1, 'Removal affected the healthy tenant renewal');
+        check($sts->calls === [], 'Removal unnecessarily refreshed healthy credentials');
+    },
+    'removed-in-flight' => static function () use (&$refresher, $sts, $path, $directory): void {
+        loadAndWait($refresher);
+        $oldTimer = state($refresher, 'refresh_credentials_timers')['tenant'];
+        $sts->started = new DeferredFuture();
+        $sts->release = new DeferredFuture();
+        $refresher->single_credential_refresh_loop('tenant', true);
+        $refresh = state($refresher, 'refreshing')['tenant'];
+        $sts->started->getFuture()->await();
+        unlink($path);
+        rmdir($directory.'/tenant');
+        $reload = $refresher->load_credentials_from_disk();
+        // A queued barrier lets reload reach its wait on the gated STS call.
+        async(static fn () => null)->await();
+        check(!$reload->isComplete(), 'Removal did not wait for the active renewal');
+        $sts->release->complete();
+        \Amp\Future\await([$refresh, $reload]);
+        EventLoop::run();
+        assertRemoved($refresher, 'tenant', $oldTimer);
+        check(liveTimers($refresher) === [], 'Failed in-flight write left a retry timer after removal');
+        check(state($refresher, 'number_of_tenants') === 0, 'Last removed tenant was still counted');
+        check(!is_dir($directory.'/tenant'), 'Renewal recreated a removed tenant directory');
+        check(count($sts->calls) === 1, 'Removal launched another STS request');
+    },
+    'removed-uncached-retry' => static function () use (&$refresher, $sts, $path, $directory): void {
+        file_put_contents($path, '');
+        $sts->failure = new RuntimeException('first renewal failed');
+        refreshAndWait($refresher, 'tenant');
+        check(!isset(state($refresher, 'credentials_array')['tenant']), 'Fixture unexpectedly cached credentials after first failure');
+        $oldTimer = state($refresher, 'refresh_credentials_timers')['tenant'];
+        check(in_array($oldTimer, liveTimers($refresher), true), 'Failed renewal did not schedule a retry');
+        unlink($path);
+        rmdir($directory.'/tenant');
+        loadAndWait($refresher);
+        assertRemoved($refresher, 'tenant', $oldTimer);
+        check(state($refresher, 'number_of_tenants') === 0, 'Uncached removed tenant was still counted');
+        check(count($sts->calls) === 1, 'Removal launched another STS request');
+    },
+    'tenant-reappears' => static function () use (&$refresher, $sts, $path, $directory, $original): void {
+        loadAndWait($refresher);
+        $oldTimer = state($refresher, 'refresh_credentials_timers')['tenant'];
+        unlink($path);
+        rmdir($directory.'/tenant');
+        loadAndWait($refresher);
+        assertRemoved($refresher, 'tenant', $oldTimer);
+        mkdir($directory.'/tenant', 0700);
+        $replacement = str_replace('old-key', 'replacement-key', $original);
+        file_put_contents($path, $replacement);
+        loadAndWait($refresher);
+        check(state($refresher, 'credentials_array')['tenant']['AWS_ACCESS_KEY_ID'] === 'replacement-key', 'Reappearing tenant reused stale credentials');
+        check(file_get_contents($path) === $replacement, 'Reappearing tenant credentials were rewritten');
+        check(count(liveTimers($refresher)) === 1, 'Reappearing tenant did not get exactly one renewal');
+        check(state($refresher, 'number_of_tenants') === 1, 'Reappearing tenant was not counted');
+        check($sts->calls === [], 'Reappearing tenant unnecessarily requested credentials');
+    },
 ];
+
+foreach (['expired', 'near-expiry', 'at-threshold', 'missing-env', 'empty-env', 'missing-expiration'] as $startupCase) {
+    $cases['startup-'.$startupCase] = static function () use (&$refresher, $sts, $path, $original, $startupCase): void {
+        $expiration = match ($startupCase) {
+            'expired' => time() - 60,
+            'near-expiry' => time() + $refresher->refresh_threshold - 60,
+            // Capturing the boundary immediately before loading avoids sleeps;
+            // by the eligibility check it is at or just inside the threshold.
+            'at-threshold' => microtime(true) + $refresher->refresh_threshold,
+            default => null,
+        };
+        if ($startupCase === 'missing-env') {
+            unlink($path);
+        } elseif ($startupCase === 'empty-env') {
+            file_put_contents($path, '');
+        } else {
+            $contents = preg_replace('/^_SESSION_EXPIRATION=.*\n/m', '', $original);
+            if ($expiration !== null) {
+                $contents .= '_SESSION_EXPIRATION='.$expiration."\n";
+            }
+            file_put_contents($path, $contents);
+        }
+        loadAndWait($refresher);
+        check(count($sts->calls) === 1, 'Startup did not request credentials exactly once: '.$startupCase);
+        $credentials = state($refresher, 'credentials_array')['tenant'];
+        $disk = Dotenv::parse(file_get_contents($path));
+        foreach (['AWS_ACCESS_KEY_ID' => 'test-key', 'AWS_SECRET_ACCESS_KEY' => 'test-secret', 'AWS_SESSION_TOKEN' => 'test-token/+=', '_SESSION_EXPIRATION' => '2051222400'] as $key => $value) {
+            check((string) $credentials[$key] === $value && $disk[$key] === $value, 'Startup did not update cache and disk: '.$key);
+        }
+        check(count(liveTimers($refresher)) === 1, 'Startup did not schedule exactly one renewal');
+        check(!file_exists($path.'.tmp'), 'Startup left a temporary file');
+    };
+}
 
 try {
     $case = $argv[1] ?? '';

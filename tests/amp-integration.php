@@ -26,6 +26,20 @@ function check(bool $condition, string $message): void
     }
 }
 
+class StartupIdleTask extends \Massdriver\EventLoopTask
+{
+    public bool $started = false;
+    public bool $queued = false;
+    public static function get_env_vars(): array { return []; }
+    public function get_iterations_count(): int { return 0; }
+    public function graceful_shutdown(): void {}
+    public function __invoke(): void
+    {
+        $this->started = true;
+        EventLoop::queue(function (): void { $this->queued = true; });
+    }
+}
+
 if (($argv[1] ?? 'transport') === 'transport') {
 $order = [];
 $queue = new AmpGuzzleTaskQueue();
@@ -550,22 +564,11 @@ $cases = [
     },
     'startup-idle' => static function (): void {
         $foreperson = new \Massdriver\Foreperson(100, 30);
-        $subsystems = [];
-        for ($index = 0; $index < 2; $index++) {
-            $subsystem = new class extends \Massdriver\EventLoopTask {
-                public bool $started = false;
-                public bool $queued = false;
-                public static function get_env_vars(): array { return []; }
-                public function get_iterations_count(): int { return 0; }
-                public function graceful_shutdown(): void {}
-                public function __invoke(): void
-                {
-                    $this->started = true;
-                    EventLoop::queue(function (): void { $this->queued = true; });
-                }
-            };
+        // Foreperson registers one subsystem per class, as it does for the
+        // credential refresher and shared queue in production.
+        $subsystems = [new StartupIdleTask(), new class extends StartupIdleTask {}];
+        foreach ($subsystems as $subsystem) {
             $foreperson->register($subsystem);
-            $subsystems[] = $subsystem;
         }
         $foreperson();
         foreach ($subsystems as $subsystem) {

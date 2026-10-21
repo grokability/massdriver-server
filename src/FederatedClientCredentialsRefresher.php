@@ -169,8 +169,23 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                     return $start;
                 })->catch(function (\Throwable $error) use ($tenant): void {
                     print "Tenant $tenant credential refresh *failed* - ".$error->getMessage()."\n";
-                    throw $error;
                 });
+            }
+            //now, find directories that have *disappeared* and cancel out their timers and stuff.
+            $known_environments = $this->credentials_array + $this->refresh_credentials_timers
+                + $this->refreshing + $this->retry_counts;
+            $removed_environments = array_diff_key($known_environments,$futures);
+            $refreshing_removed_environments = array_intersect_key($this->refreshing, $removed_environments);
+            //just let a credential finish refreshing on a removed environment; canceling won't save us very much.
+            awaitAll($refreshing_removed_environments);
+            foreach($removed_environments as $tenant => $credentials) {
+                if (isset($this->refresh_credentials_timers[$tenant])) {
+                    EventLoop::cancel($this->refresh_credentials_timers[$tenant]);
+                    unset($this->refresh_credentials_timers[$tenant]);
+                    print "Canceling timer for $tenant because it's been removed, and ";
+                }
+                print "Deleting credentials entry for $tenant\n";
+                unset($this->credentials_array[$tenant], $this->retry_counts[$tenant]);
             }
             $this->number_of_tenants = count($futures);
             print "Number of tenants has been initialized to: ".$this->number_of_tenants."\n";
@@ -191,13 +206,26 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
             EventLoop::cancel($this->refresh_credentials_timers[$tenant]);
             unset($this->refresh_credentials_timers[$tenant]);
         }
-
         $this->refreshing[$tenant] = async(function () use ($tenant,$force_reload): void {
             $start = microtime(true);
-            $credentials = $this->credentials_array[$tenant] ?? [];
-            $delay = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true) - $this->refresh_threshold;
-            if ($delay <= 0 || $force_reload) {
-                try {
+            try {
+                if(!array_key_exists($tenant,$this->credentials_array) && !$force_reload) {
+                    // in this case, credentials *might* be on the disk, but are definitely *not* in the credentials-cache.
+                    // Re-reading them from disk prevents us from refreshing perfectly good credentials unnecessarily.
+                    // But there's no point in doing this if we're doing a "Force reload" - we're just going to
+                    // snag new credentials anyways, so why bother looking up what they might be now?
+                    $env_file_contents = readFileContents($this->env_path_for_tenant($tenant));
+                    if($env_file_contents) {
+                        $env_vars = Dotenv::parse($env_file_contents);
+                        $this->credentials_array[$tenant] = array_intersect_key($env_vars,static::CREDENTIAL_MAP);
+                        print "Loaded $tenant credentials from disk!\n";
+                    } else {
+                        print "No credentials found for $tenant\n";
+                    }
+                }
+                $credentials = $this->credentials_array[$tenant] ?? [];
+                $delay = ($credentials['_SESSION_EXPIRATION'] ?? 0) - microtime(true) - $this->refresh_threshold;
+                if ($delay <= 0 || $force_reload) {
                     $credential_future = async(fn () => $this->refresh_one_credential($tenant));
                     $contents = async(fn () => readFileContents($this->env_path_for_tenant($tenant)));
                     $this->write_one_credential($tenant, $credential_future, $contents);
@@ -205,35 +233,35 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                     $this->credentials_array[$tenant] = $credentials;
                     unset($this->retry_counts[$tenant]);
                     $delay = $credentials['_SESSION_EXPIRATION'] - microtime(true) - $this->refresh_threshold;
-                } catch (\Throwable $error) {
-                    // TODO: I don't get why the math is so weird here. What's up with that?
-                    $delays = [5, 10, 30, 45, 60];
-                    $attempt = $this->retry_counts[$tenant] ?? 0;
-                    $delay = $delays[min($attempt, count($delays) - 1)];
-                    $this->retry_counts[$tenant] = min($attempt + 1, count($delays) - 1);
-                    print "Exception caught when renewing credentials: $tenant: {$error->getMessage()}. Retrying in $delay seconds.\n";
-                    // this *executes* on its delay by falling off the end here, and getting handled by the
-                    // EventLoop::delay() stuff, below
-                }
-                print "Actual re-fetch of credentials for $tenant in IAM took ".(microtime(true)-$start)." seconds, next scheduled for $delay seconds\n";
-            } else {
-                //confirm that the credentials are actually on the disk - in some cases, they're in memory, but not on the disk!
-                $credentials_on_disk = true;
-                $credentials_contents = readFileContents($this->env_path_for_tenant($tenant));
-                foreach(array_keys(static::CREDENTIAL_MAP) as $env_var_name) {
-                    if(!strstr($credentials_contents, $env_var_name)) {
-                        $credentials_on_disk = false;
-                        break;
+                    print "Actual re-fetch of credentials for $tenant in IAM took ".(microtime(true)-$start)." seconds, next scheduled for $delay seconds\n";
+                } else {
+                    //confirm that the credentials are actually on the disk - in some cases, they're in memory, but not on the disk!
+                    $credentials_on_disk = true;
+                    $credentials_contents = readFileContents($this->env_path_for_tenant($tenant));
+                    foreach(array_keys(static::CREDENTIAL_MAP) as $env_var_name) {
+                        if(!strstr($credentials_contents, $env_var_name)) {
+                            $credentials_on_disk = false;
+                            break;
+                        }
+                    }
+                    if(!$credentials_on_disk) {
+                        print "Credentials for $tenant are not present in .env file, rewriting them. Refreshes in: $delay seconds.\n";
+                        // it's a little weird that we have the tenants credentials in *memory*, but we have to
+                        // wrap it in an async() - but that's the signature of that function; it wants a Future
+                        $this->write_one_credential($tenant, async(fn () => $this->credentials_array[$tenant]), async(fn () => readFileContents($this->env_path_for_tenant($tenant))));
+                    } else {
+                        print "Credentials not due for refresh for $tenant yet, still need $delay seconds\n";
                     }
                 }
-                if(!$credentials_on_disk) {
-                    print "Credentials for $tenant are not present in .env file, rewriting them. Refreshes in: $delay seconds.\n";
-                    // it's a little weird that we have the tenants credentials in *memory*, but we have to
-                    // wrap it in an async() - but that's the signature of that function; it wants a Future
-                    $this->write_one_credential($tenant, async(fn () => $this->credentials_array[$tenant]), async(fn () => readFileContents($this->env_path_for_tenant($tenant))));
-                } else {
-                    print "Credentials not due for refresh for $tenant yet, still need $delay seconds\n";
-                }
+            } catch (\Throwable $error) {
+                // TODO: I don't get why the math is so weird here. What's up with that?
+                $delays = [5, 10, 30, 45, 60];
+                $attempt = $this->retry_counts[$tenant] ?? 0;
+                $delay = $delays[min($attempt, count($delays) - 1)];
+                $this->retry_counts[$tenant] = min($attempt + 1, count($delays) - 1);
+                print "Exception caught when renewing credentials: $tenant: {$error->getMessage()}. Retrying in $delay seconds.\n";
+                // this *executes* on its delay by falling off the end here, and getting handled by the
+                // EventLoop::delay() stuff, below
             }
             if($this->stopping) {
                 // Do not try and schedule a new refresh if we're stopping

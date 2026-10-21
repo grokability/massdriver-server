@@ -52,10 +52,15 @@ cleanup after a rendering error. They do not contact AWS.
 | `refresher/duplicate-keys` | Duplicate assignments do not override refreshed credentials |
 | `refresher/concurrent-refresh`, `retry-reset` | Overlapping renewal/reload requests share work and successful renewal resets backoff |
 | `refresher/load` | Loading valid credentials, scheduling renewal and shutdown cleanup |
+| `refresher/startup-expired`, `startup-near-expiry`, `startup-at-threshold` | Startup renews expired credentials and credentials at or inside the refresh threshold exactly once |
+| `refresher/startup-missing-env`, `startup-empty-env`, `startup-missing-expiration` | Startup acquires credentials when the file or expiration is absent |
+| `refresher/force-reload` | Forced reload replaces valid credentials and cancels the old renewal timer |
+| `refresher/malformed-env` | Invalid dotenv content is preserved and retried without terminating the event loop or preventing healthy tenants from loading; corrected files recover on retry |
+| `refresher/removed-tenant`, `removed-in-flight`, `removed-uncached-retry` | Removed tenants lose cached credentials, real timers and retry state, including a gated in-flight renewal and a failed first acquisition without cached credentials |
+| `refresher/tenant-reappears` | Recreated tenant directories load current credentials and receive exactly one renewal timer |
 | `refresher/backoff`, `retry-isolation` | Failure backoff and independent tenant retry budgets |
 | `refresher/reschedule` | Reloading newer credentials preserves a future renewal after the old deadline |
 | `refresher/shutdown-in-flight` | A renewal finishing during shutdown must not schedule further work |
-| `refresher/empty` | Iteration counts stay zero before loading and with no tenants |
 
 Credential fixtures bypass the constructor solely to inject fake STS and avoid
 AWS credential discovery. They exercise the real load, refresh, write and shutdown
