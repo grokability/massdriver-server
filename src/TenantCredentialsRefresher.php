@@ -44,7 +44,7 @@ function writeFileContents(string $path, string $contents, ?string $same_as_file
     write($path, $contents);
 }
 
-class FederatedClientCredentialsRefresher extends EventLoopTask
+class TenantCredentialsRefresher extends EventLoopTask
 {
     const array CREDENTIAL_MAP = [
         'AWS_ACCESS_KEY_ID' => 'AccessKeyId',
@@ -53,7 +53,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         '_SESSION_EXPIRATION' => 'Expiration',
     ];
 
-    const string ENV_FILE_COMMENT = '# .env file modified by FederatedClientCredentialsRefresher, a part of Massdriver';
+    const string ENV_FILE_COMMENT = '# .env file modified by TenantCredentialsRefresher, a part of Massdriver';
 
     public static function get_env_vars(): array
     {
@@ -64,10 +64,11 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                 'INLINE_ROLE_QUOTES_TO_APOSTROPHES' => fn($e) => str_replace("'",'"',$e)
             ],
             'arns' => [
-                'ROLE_ARNS' => fn($e) => array_filter(explode(",",$e)),
+                'POLICY_ARNS' => fn($e) => array_filter(explode(",",$e)),
             ],
             'credential_duration' => 'CREDENTIAL_DESIRED_DURATION',
-            'refresh_threshold' => 'CREDENTIAL_REFRESH_THRESHOLD'
+            'refresh_threshold' => 'CREDENTIAL_REFRESH_THRESHOLD',
+            'assume_role_arn' => 'ASSUME_ROLE_ARN',
         ];
     }
 
@@ -82,17 +83,25 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
     protected int $number_of_tenants = 0;
     protected string $directory_prefix;
     protected string $directory_suffix;
+    protected string $sts_command;
 
     public function __construct(
         /** @noinspection SpellCheckingInspection */
         string $directory,
         public string $inline_role = '',
         public array $arns = [],
+        public string $assume_role_arn='',
         public int $credential_duration = 129_600,
         public int $refresh_threshold = 3600,
     )
     {
         print "Constructing Refresher Object\n";
+        if($this->assume_role_arn) {
+            $this->sts_command = 'assumeRole';
+        } else {
+            $this->sts_command = 'getFederationToken';
+        }
+        print "Selected Credential refresh method: ".$this->sts_command."\n";
         $this->sts_client = new AmpAws(
             'Sts',
             [
@@ -102,7 +111,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
         if(!str_contains($directory,'{TENANT}')){
             throw new \Exception("Directory '$directory' does not have {TENANT}");
         }
-        list($this->directory_prefix, $this->directory_suffix) = explode('{TENANT}',$directory);
+        list($this->directory_prefix, $this->directory_suffix) = explode('{TENANT}',$directory); //TODO - what if {TENANT} repeats?
     }
 
     public function __invoke(): void
@@ -280,9 +289,6 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
     {
         $params = [
             'DurationSeconds' => $this->credential_duration,
-            'Name' => md5($tenant),
-            // Policy will get subbed in here for $this->inline_policy (if set)
-            // PolicyArns will get subbed in here for $this->$this->arns (also only if set)
             'Tags' => [
                 [
                     'Key' => 'slug',
@@ -290,6 +296,16 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
                 ]
             ]
         ];
+        $params+= match($this->sts_command) {
+            'getFederationToken' => [
+                'Name' => md5($tenant),
+            ],
+            'assumeRole' => [
+                'RoleSessionName' => $tenant,
+                'RoleArn' => $this->assume_role_arn
+            ],
+            default => throw new \RuntimeException("Unsupported STS method: " . $this->sts_command)
+        };
         if($this->inline_role) {
             $params['Policy'] = $this->inline_role;
         }
@@ -300,7 +316,7 @@ class FederatedClientCredentialsRefresher extends EventLoopTask
             }
             $params['PolicyArns'] = $policy_arns;
         }
-        $result = $this->sts_client->getFederationToken($params);
+        $result = $this->sts_client->{$this->sts_command}($params);
         $credentials = [];
         $results = $result['Credentials'];
         foreach(self::CREDENTIAL_MAP as $env_name => $aws_name) {

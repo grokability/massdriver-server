@@ -9,7 +9,7 @@ use Aws\Api\DateTimeResult;
 use Aws\Result;
 use Dotenv\Dotenv;
 use Massdriver\AmpAws\AmpAws;
-use Massdriver\FederatedClientCredentialsRefresher as Refresher;
+use Massdriver\TenantCredentialsRefresher as Refresher;
 use Revolt\EventLoop;
 use function Amp\async;
 use function Amp\delay;

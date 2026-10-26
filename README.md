@@ -91,7 +91,7 @@ algorithm, very long-duration tasks can still complete successfully, and short-l
 This optional component will take a directory of Laravel installs (`DIRECTORY_OF_ENV_VARS` in the `.env`), and create 
 or refresh "federated" credentials for each, manually writing them back into each `.env` file. The permissions for the 
 federated credentials will be based on `INLINE_ROLE` or `INLINE_ROLE_QUOTES_TO_APOSTROPHES` (not both) and/or 
-`ROLE_ARNS` which is a comma-delimited list of policies that you want to the federated user to be associated with. The
+`POLICY_ARNS` which is a comma-delimited list of policies that you want to the federated user to be associated with. The
 `INLINE_ROLE_QUOTES_TO_APOSTROPHES` `.env` var exists because otherwise, you would have to keep backslashing all of the
 quotes inside of your inline role, which is unpleasant to look at, and hard to diagnose. So you can just replace them with
 apostrophes instead (`'`). You still *will* have to backslash any dollar signs, however.

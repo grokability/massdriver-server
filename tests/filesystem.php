@@ -7,7 +7,7 @@ use Amp\File\Driver\BlockingFilesystemDriver;
 use Amp\File\Driver\ParallelFilesystemDriver;
 use Amp\Future;
 use Amp\Parallel\Worker\ContextWorkerPool;
-use Massdriver\FederatedClientCredentialsRefresher;
+use Massdriver\TenantCredentialsRefresher;
 use Revolt\EventLoop;
 use function Amp\File\filesystem;
 
@@ -34,7 +34,7 @@ $original = "APP_NAME=example\nAWS_ACCESS_KEY_ID=old\n";
 file_put_contents($path, $original);
 chmod($path, 0600);
 $before = stat($path);
-$reflection = new ReflectionClass(FederatedClientCredentialsRefresher::class);
+$reflection = new ReflectionClass(TenantCredentialsRefresher::class);
 $refresher = $reflection->newInstanceWithoutConstructor();
 $reflection->getProperty('directory_prefix')->setValue($refresher, $directory);
 $reflection->getProperty('directory_suffix')->setValue($refresher, '');

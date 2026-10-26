@@ -12,7 +12,7 @@ $dotenv->required(['AWS_REGION']);
 
 use Aws\Sts\StsClient;
 use Massdriver\SharedQueue;
-use Massdriver\FederatedClientCredentialsRefresher;
+use Massdriver\TenantCredentialsRefresher;
 
 $sts = new StsClient([
     'version' => '2011-06-15',
@@ -52,7 +52,7 @@ if(!empty($argv[1])) {
             print "$massdriver_var\n";
         }
         print "\n(Credential-fetcher-specific environment variables:)\n\n";
-        foreach(FederatedClientCredentialsRefresher::get_env_var_names() as $fed_cred) {
+        foreach(TenantCredentialsRefresher::get_env_var_names() as $fed_cred) {
             print "$fed_cred\n";
         }
         exit(1);
@@ -66,8 +66,8 @@ $foreperson = new Foreperson(...Foreperson::env_to_constructor_params($_ENV));
 
 $refresher = null;
 if(isset($_ENV['DIRECTORY_OF_ENV_VARS'])) {
-    $refresher_params = FederatedClientCredentialsRefresher::env_to_constructor_params($_ENV);
-    $refresher = new FederatedClientCredentialsRefresher(...$refresher_params);
+    $refresher_params = TenantCredentialsRefresher::env_to_constructor_params($_ENV);
+    $refresher = new TenantCredentialsRefresher(...$refresher_params);
     $foreperson->register($refresher);
 }
 

@@ -21,7 +21,7 @@ Amp filesystem loading. No static-analysis configuration exists in this project.
   `->await()`; use `map()` / `catch()` for continuations. Futures are not cancellable
   promises: pass a Cancellation to `AmpAws::receiveMessage()` to abort a poll.
 - Revolt owns the global event loop. The first loop argument has been removed from
-  `SharedQueue`, `Task::boot`, and `FederatedClientCredentialsRefresher`.
+  `SharedQueue`, `Task::boot`, and `TenantCredentialsRefresher`.
   `Massdriver\AmpAws\AmpAws` replaces `Massdriver\ReactAws\ReactAws` and takes
   `(string $client_type, array $options = [])`. Call ordinary operation names without
   `Async`; the wrapper selects SDK async methods internally and returns AWS Results.
